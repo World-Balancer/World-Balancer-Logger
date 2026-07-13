@@ -1,0 +1,41 @@
+{
+  "name": "world-balancer-avatar-logger",
+  "version": "0.0.3",
+  "description": "Logger",
+  "main": "index.js",
+  "bin": "index.js",
+  "author": "worldbalancer",
+  "scripts": {
+    "test": "electron .",
+    "build": "electron-builder build --win"
+  },
+  "build": {
+    "appId": "com.worldbalancer.worldbalancer",
+    "nsis": {
+      "allowToChangeInstallationDirectory": true,
+      "license": "license.txt",
+      "oneClick": false
+    },
+    "win": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "icon": "assets/icon.png",
+      "target": [
+        "nsis",
+        "msi"
+      ]
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "axios": "0.27.2",
+    "http": "^0.0.1-security",
+    "https": "^1.0.0",
+    "path": "^0.12.7",
+    "sequelize": "^6.37.8",
+    "sqlite3": "^6.0.1"
+  },
+  "devDependencies": {
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3"
+  }
+}

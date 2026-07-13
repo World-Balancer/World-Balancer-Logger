@@ -1,0 +1,506 @@
+<!--
+MIT License
+
+Copyright (c) 2026 World Balancer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-->
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>World Balancer Logger</title>
+        <link
+            rel="stylesheet"
+            href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css"
+        />
+        <link
+            href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css"
+            rel="stylesheet"
+            integrity="sha384-rbsA2VBKQhggwzxH7pPCaAqO46MgnOM80zW1RWuH61DGLwZJEdK2Kadq2F9CUG65"
+            crossorigin
+        />
+        <style>
+            body {
+                background-color: #0d0d0d;
+                color: #f0f0f0;
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            }
+
+            header {
+                background: linear-gradient(135deg, #d127ca, #0dfdde);
+                color: #ffffff;
+                box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+            }
+
+            .nav-tabs {
+                border-bottom: 1px solid #d127ca;
+            }
+
+            .nav-tabs .nav-link {
+                color: #f17acc;
+                font-weight: 500;
+                transition:
+                    color 0.3s ease,
+                    background-color 0.3s ease;
+                display: flex;
+                align-items: center;
+                gap: 0.4em;
+            }
+
+            .nav-tabs .nav-link:hover {
+                color: #ffffff;
+                background-color: #2c2c2c;
+            }
+
+            .nav-tabs .nav-link.active {
+                background-color: #111;
+                border-color: #d127ca #d127ca #000;
+                color: #0dfdde;
+            }
+
+            .container-fluid {
+                padding: 20px;
+            }
+
+            .logsDiv {
+                overflow-y: auto;
+                height: 400px;
+                background-color: #1c1e1f;
+                padding: 12px;
+                border-radius: 6px;
+                border: 1px solid #333;
+                box-shadow: inset 0 0 10px rgba(255, 255, 255, 0.05);
+            }
+
+            .logsDiv p {
+                color: #ffb6c1;
+                font-family: monospace;
+                margin: 0;
+                padding: 2px 0;
+            }
+
+            .logsDiv p.log-error {
+                color: #ff6b6b;
+                font-weight: bold;
+            }
+            .logsDiv p.log-warn {
+                color: #ffd166;
+            }
+
+            .logsDiv::-webkit-scrollbar {
+                width: 8px;
+            }
+
+            .logsDiv::-webkit-scrollbar-thumb {
+                background: #adb5bd;
+                border-radius: 4px;
+            }
+
+            .logsDiv::-webkit-scrollbar-track {
+                background: #e9ecef;
+            }
+
+            .card {
+                border-radius: 10px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            }
+
+            .card-header {
+                background-color: #121212;
+                border-bottom: 1px solid #444;
+                font-weight: 600;
+                font-size: 1.1rem;
+            }
+
+            .card-body {
+                background-color: #1e1e1e;
+            }
+
+            .btn {
+                border-radius: 8px;
+                transition:
+                    background-color 0.3s ease,
+                    transform 0.2s ease;
+            }
+
+            .btn:hover {
+                transform: translateY(-1px);
+                opacity: 0.9;
+            }
+
+            .btn-toggle {
+                background-color: #6c757d;
+                color: white;
+            }
+
+            .modal-content {
+                border: 1px solid #444;
+            }
+
+            .modal-header,
+            .modal-footer {
+                border-color: #444;
+            }
+
+            .modal-title {
+                color: #ff5eaa;
+            }
+
+            footer {
+                padding: 20px;
+                background-color: #111;
+                color: #888;
+                font-size: 0.9rem;
+                margin-top: 40px;
+            }
+
+            .discord-status {
+                background-color: rgba(0, 0, 0, 0.4);
+                padding: 4px 12px;
+                border-radius: 20px;
+                font-size: 0.9rem;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+
+            .form-control-dark {
+                background-color: #2b2b2b;
+                border: 1px solid #444;
+                color: #fff;
+            }
+
+            .form-control-dark:focus {
+                background-color: #333;
+                border-color: #0dfdde;
+                color: #fff;
+                box-shadow: 0 0 0 0.25rem rgba(13, 253, 222, 0.25);
+            }
+
+            @media (max-width: 576px) {
+                .card-header {
+                    font-size: 1rem;
+                    text-align: center;
+                }
+
+                .form-label {
+                    font-size: 0.9rem;
+                }
+
+                .btn {
+                    width: 100%;
+                    margin-top: 10px;
+                }
+
+                .nav-tabs {
+                    flex-direction: column;
+                }
+            }
+
+            .table-responsive {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .table-dark th,
+            .table-dark td {
+                white-space: nowrap;
+                border-color: #333;
+            }
+
+            .table-dark {
+                background-color: #2b2b2b;
+            }
+
+            .form-check-input:checked {
+                background-color: #0dfdde;
+                border-color: #0dfdde;
+            }
+
+            .modal-dialog {
+                z-index: 1050;
+            }
+
+            .modal-backdrop {
+                z-index: 1040;
+            }
+
+            #warningModal {
+                z-index: 1050;
+                display: none;
+            }
+        </style>
+    </head>
+
+    <body>
+        <header class="bg-dark text-white text-center py-3 position-relative">
+            <h1>Log Viewer</h1>
+            <div
+                class="position-absolute top-50 end-0 translate-middle-y me-3 d-none d-sm-block"
+            >
+                <div class="discord-status">
+                    <i class="bi bi-discord"></i> ID:
+                    <span id="discordUserIdDisplay">Loading...</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="container-fluid">
+            <ul class="nav nav-tabs" id="logTabs" role="tablist">
+                <li class="nav-item">
+                    <a
+                        class="nav-link active"
+                        id="main-log-tab"
+                        data-bs-toggle="tab"
+                        href="#main-log"
+                        role="tab"
+                    >
+                        <i class="bi bi-terminal"></i> Main Log
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a
+                        class="nav-link"
+                        id="settings-tab"
+                        data-bs-toggle="tab"
+                        href="#settings"
+                        role="tab"
+                    >
+                        <i class="bi bi-gear"></i> Settings
+                    </a>
+                </li>
+            </ul>
+
+            <div class="tab-content mt-3" id="logTabContent">
+                <div
+                    class="tab-pane fade show active"
+                    id="main-log"
+                    role="tabpanel"
+                >
+                    <div
+                        class="d-flex justify-content-between align-items-center mb-2"
+                    >
+                        <div class="form-check text-secondary">
+                            <input
+                                class="form-check-input"
+                                type="checkbox"
+                                id="autoScrollToggle"
+                                checked
+                            />
+                            <label
+                                class="form-check-label"
+                                for="autoScrollToggle"
+                            >
+                                Auto-scroll
+                            </label>
+                        </div>
+                        <button
+                            class="btn btn-sm btn-danger"
+                            onclick="clearLogs('mainLogContent')"
+                        >
+                            Clear Logs
+                        </button>
+                    </div>
+                    <div class="logsDiv" id="mainLogContent"></div>
+                </div>
+
+                <div class="tab-pane fade" id="settings" role="tabpanel">
+                    <div class="p-3 bg-dark border rounded border-secondary">
+                        <div class="card bg-dark text-white">
+                            <div class="card-header">Discord Settings</div>
+                            <div class="card-body">
+                                <div class="mb-3">
+                                    <label
+                                        for="discordIdInput"
+                                        class="form-label"
+                                        >Discord User ID</label
+                                    >
+                                    <input
+                                        type="text"
+                                        class="form-control form-control-dark"
+                                        id="discordIdInput"
+                                        placeholder="Enter your Discord ID"
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card bg-dark text-white">
+                            <div class="card-header">Save Options</div>
+                            <div class="card-body">
+                                <form id="debugSettingsForm">
+                                    <button
+                                        type="button"
+                                        class="btn btn-success"
+                                        onclick="saveConfig()"
+                                    >
+                                        Save Settings
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer class="text-center mt-5">
+            <h2>Copyright © 2026 World Balancer</h2>
+        </footer>
+
+        <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+        <script
+            src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.6/dist/umd/popper.min.js"
+            integrity="sha384-oBqDVmMz9ATKxIep9tiCxS/Z9fNfEXiDAYTujMAeBAsjFuCZSmKbSSUnQlmh/jp3"
+            crossorigin="anonymous"
+        ></script>
+        <script
+            src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.min.js"
+            integrity="sha384-cuYeSxntonz0PPNlHhBs68uyIAVpIIOZZ5JqeqvYYIcEL727kskC66kF92t6Xl2V"
+            crossorigin="anonymous"
+        ></script>
+
+        <script>
+            function clearLogs(id) {
+                const div = document.getElementById(id);
+                if (div) div.innerHTML = "";
+            }
+
+            document
+                .querySelectorAll('[data-bs-toggle="tab"]')
+                .forEach((tab) => {
+                    tab.addEventListener("shown.bs.tab", (e) => {
+                        localStorage.setItem("activeTab", e.target.id);
+                    });
+                });
+
+            window.addEventListener("DOMContentLoaded", () => {
+                const activeTabId = localStorage.getItem("activeTab");
+                if (activeTabId) {
+                    const triggerEl = document.getElementById(activeTabId);
+                    if (triggerEl) {
+                        new bootstrap.Tab(triggerEl).show();
+                    }
+                }
+            });
+        </script>
+
+        <script>
+            const logsDivMain = document.getElementById("mainLogContent");
+            const autoScrollToggle =
+                document.getElementById("autoScrollToggle");
+            const MAX_LOG_LINES = 500;
+
+            const clearLogSubscription = window.api.onLogUpdate((logData) => {
+                if (logData.type === "main_log") {
+                    const logElement = document.createElement("p");
+
+                    if (logData.level === "error")
+                        logElement.classList.add("log-error");
+                    if (logData.level === "warn")
+                        logElement.classList.add("log-warn");
+
+                    logElement.textContent = logData.message;
+                    logsDivMain.appendChild(logElement);
+
+                    while (logsDivMain.childNodes.length > MAX_LOG_LINES) {
+                        logsDivMain.removeChild(logsDivMain.firstChild);
+                    }
+
+                    if (autoScrollToggle && autoScrollToggle.checked) {
+                        logsDivMain.scrollTop = logsDivMain.scrollHeight;
+                    }
+                }
+            });
+
+            window.addEventListener("unload", () => {
+                if (typeof clearLogSubscription === "function")
+                    clearLogSubscription();
+            });
+        </script>
+
+        <script>
+            const directoriesOptions = {};
+
+            async function loadConfig() {
+                try {
+                    const savedConfig = await window.api.loadConfig();
+
+                    Object.assign(
+                        directoriesOptions,
+                        savedConfig.Directories || {},
+                    );
+
+                    if (savedConfig.Userid && savedConfig.Userid.discord_id) {
+                        document.getElementById(
+                            "discordUserIdDisplay",
+                        ).textContent = savedConfig.Userid.discord_id;
+                        document.getElementById("discordIdInput").value =
+                            savedConfig.Userid.discord_id;
+                    } else {
+                        document.getElementById(
+                            "discordUserIdDisplay",
+                        ).textContent = "Not Set";
+                        document.getElementById("discordIdInput").value = "";
+                    }
+                } catch (error) {
+                    console.error("Failed to load config:", error);
+                    document.getElementById(
+                        "discordUserIdDisplay",
+                    ).textContent = "Error Loading";
+                }
+            }
+
+            async function saveConfig() {
+                const currentDiscordId = document
+                    .getElementById("discordIdInput")
+                    .value.trim();
+
+                const config = {
+                    Directories: directoriesOptions,
+                    Userid: {
+                        discord_id: currentDiscordId,
+                    },
+                };
+
+                try {
+                    await window.api.saveConfig(config);
+                    console.log("Configuration saved:", config);
+                    document.getElementById(
+                        "discordUserIdDisplay",
+                    ).textContent = currentDiscordId
+                        ? currentDiscordId
+                        : "Not Set";
+                } catch (error) {
+                    console.error("Failed to save config:", error);
+                }
+            }
+
+            function init() {
+                loadConfig();
+            }
+
+            init();
+        </script>
+    </body>
+</html>

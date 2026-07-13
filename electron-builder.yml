@@ -1,0 +1,13 @@
+appId: com.worldbalancer.worldbalancer
+productName: World Balancer
+copyright: Copyright 2026 World Balancer
+
+win:
+  target:
+    - nsis
+    - msi
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  license: license.txt
