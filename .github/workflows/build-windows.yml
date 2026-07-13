@@ -1,0 +1,47 @@
+name: Build Windows
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows app
+        run: npx electron-builder --win --publish=never
+        env:
+          # Needed if auto-update / publishing is configured
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Uncomment if you sign your app with a certificate
+          # CSC_LINK: ${{ secrets.CSC_LINK }}
+          # CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.blockmap
+            dist/latest.yml
+          if-no-files-found: warn
