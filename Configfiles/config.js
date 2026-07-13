@@ -55,16 +55,24 @@ function parseConfigValue(rawValue) {
 function setNestedProperty(obj, pathStr, value) {
   const parts = pathStr.split(".");
   let current = obj;
+  const isUnsafeKey = (key) => key === "__proto__" || key === "constructor" || key === "prototype";
 
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
+    if (isUnsafeKey(part)) {
+      return;
+    }
     if (!current[part] || typeof current[part] !== "object") {
       current[part] = {};
     }
     current = current[part];
   }
 
-  current[parts[parts.length - 1]] = value;
+  const lastPart = parts[parts.length - 1];
+  if (isUnsafeKey(lastPart)) {
+    return;
+  }
+  current[lastPart] = value;
 }
 
 async function fetchConfig() {
