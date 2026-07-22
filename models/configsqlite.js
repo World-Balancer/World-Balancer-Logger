@@ -35,6 +35,7 @@ function getUserDataPath() {
       return path.join(app.getPath("userData"), "config");
     }
   } catch {
+    // empty
   }
 
   const platform = process.platform;
