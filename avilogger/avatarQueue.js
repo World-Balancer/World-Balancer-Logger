@@ -29,7 +29,7 @@ const main = require("../main");
 const getConfig = require("../models/getConfig");
 const { log_error } = require("../functions/logsclass.js");
 
-function reportError(message, emitToMain = false) {
+function reportAppError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
   if (emitToMain) {
     main.log(message, "error", "main_log");

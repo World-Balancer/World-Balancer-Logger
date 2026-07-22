@@ -55,7 +55,7 @@ const axiosInstance = axios.create({
   },
 });
 
-function reportError(message, emitToMain = false) {
+function reportQueueError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
   if (emitToMain) {
     main.log(message, "error", "main_log");

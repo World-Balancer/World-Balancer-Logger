@@ -53,7 +53,7 @@ let currentLogFile = null;
 let lastReadPosition = 0;
 let pendingPartialLine = "";
 
-function reportError(message, emitToMain = false) {
+function reportAppError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
   if (emitToMain) {
     main.log(message, "error", "main_log");
