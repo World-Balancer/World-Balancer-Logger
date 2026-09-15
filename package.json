@@ -1,5 +1,5 @@
 {
-  "name": "world-balancer-avatar-logger",
+  "name": "world-balancer-avatar-logger-test",
   "version": "0.0.3",
   "description": "Logger",
   "main": "index.js",
