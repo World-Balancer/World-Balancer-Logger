@@ -71,17 +71,26 @@ async function checkForNewFiles() {
     }
 
     const logFileNames = await fs.promises.readdir(logDirectory);
-    const newLogFileNames = logFileNames.filter(name => name && name.startsWith("output_log"));
+    const newLogFileNames = logFileNames.filter(
+      (name) => name && name.startsWith("output_log"),
+    );
 
     if (newLogFileNames.length > 0) {
       newLogFileNames.sort();
-      const latestLogFile = path.join(logDirectory, newLogFileNames[newLogFileNames.length - 1]);
+      const latestLogFile = path.join(
+        logDirectory,
+        newLogFileNames[newLogFileNames.length - 1],
+      );
 
       if (latestLogFile !== currentLogFile) {
         currentLogFile = latestLogFile;
         lastReadPosition = 0;
         pendingPartialLine = "";
-        main.log(`Switching to new log file: ${currentLogFile}`, "info", "main_log");
+        main.log(
+          `Switching to new log file: ${currentLogFile}`,
+          "info",
+          "main_log",
+        );
       }
     }
   } catch (err) {
@@ -121,7 +130,7 @@ async function readNewLogs(fileSize) {
 
     let newData = pendingPartialLine;
 
-    stream.on("data", chunk => {
+    stream.on("data", (chunk) => {
       newData += chunk;
     });
 
@@ -131,7 +140,7 @@ async function readNewLogs(fileSize) {
       resolve([lines, fileSize]);
     });
 
-    stream.on("error", err => {
+    stream.on("error", (err) => {
       reject(err);
     });
   });
@@ -156,7 +165,11 @@ async function monitorAndSend() {
             if (switchMatch) {
               const username = switchMatch[1].trim();
               const avatarName = switchMatch[2].trim();
-              main.log(`User ${username} switching to ${avatarName}`, "info", "main_log");
+              main.log(
+                `User ${username} switching to ${avatarName}`,
+                "info",
+                "main_log",
+              );
 
               enqueueSwitchStatus(username, avatarName);
             }
@@ -165,12 +178,17 @@ async function monitorAndSend() {
             if (apiMatch) {
               const avatarId = apiMatch[1];
 
-              const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
+              const isNewAvatarId =
+                await avatar_id_store.checkAndMark(avatarId);
               if (!isNewAvatarId) {
                 continue;
               }
 
-              main.log(`Found avatar ID via API: ${avatarId}`, "info", "main_log");
+              main.log(
+                `Found avatar ID via API: ${avatarId}`,
+                "info",
+                "main_log",
+              );
 
               enqueueLogAvatar(avatarId, "system_log");
             }
@@ -181,10 +199,14 @@ async function monitorAndSend() {
           pendingPartialLine = "";
         }
       } else {
-        main.log("No log file selected. Waiting for a new log file...", "info", "main_log");
+        main.log(
+          "No log file selected. Waiting for a new log file...",
+          "info",
+          "main_log",
+        );
       }
 
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   } catch (error) {
     reportError(`Error stack of monitor of VRChat: ${error.message}`, true);
@@ -194,10 +216,14 @@ async function monitorAndSend() {
 monitorAndSend();
 
 process.on("uncaughtException", (err, origin) => {
-  reportError(`Uncaught Exception at: ${new Date().toISOString()}\nError: ${err.message}\nStack: ${err.stack}\nOrigin: ${origin}`);
+  reportError(
+    `Uncaught Exception at: ${new Date().toISOString()}\nError: ${err.message}\nStack: ${err.stack}\nOrigin: ${origin}`,
+  );
   setTimeout(() => process.exit(1), 100);
 });
 
 process.on("unhandledRejection", (reason, promise) => {
-  reportError(`Unhandled Rejection at: ${new Date().toISOString()}\nReason: ${reason}\nPromise: ${promise}`);
+  reportError(
+    `Unhandled Rejection at: ${new Date().toISOString()}\nReason: ${reason}\nPromise: ${promise}`,
+  );
 });

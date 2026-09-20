@@ -34,7 +34,7 @@ const configDir = path.join(appInstallPath, "config");
 
 Promise.all([
   fs.promises.mkdir(logDir, { recursive: true }),
-  fs.promises.mkdir(configDir, { recursive: true })
+  fs.promises.mkdir(configDir, { recursive: true }),
 ]).catch((err) => {
   log_error.writeErrorToFile(`Directory initialization error: ${err.message}`);
 });
@@ -42,7 +42,11 @@ Promise.all([
 function parseConfigValue(rawValue) {
   if (typeof rawValue !== "string") return rawValue;
   const trimmed = rawValue.trim();
-  if (!(trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"'))) {
+  if (!(
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    trimmed.startsWith('"')
+  )) {
     return rawValue;
   }
   try {
@@ -55,7 +59,8 @@ function parseConfigValue(rawValue) {
 function setNestedProperty(obj, pathStr, value) {
   const parts = pathStr.split(".");
   let current = obj;
-  const isUnsafeKey = (key) => key === "__proto__" || key === "constructor" || key === "prototype";
+  const isUnsafeKey = (key) =>
+    key === "__proto__" || key === "constructor" || key === "prototype";
 
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];

@@ -34,7 +34,11 @@ function safeJsonParse(rawValue) {
   if (typeof rawValue !== "string") return rawValue;
 
   const trimmed = rawValue.trim();
-  if (!(trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"'))) {
+  if (!(
+    trimmed.startsWith("{") ||
+    trimmed.startsWith("[") ||
+    trimmed.startsWith('"')
+  )) {
     return rawValue;
   }
 
@@ -47,13 +51,15 @@ function safeJsonParse(rawValue) {
 
 async function getConfig(key) {
   if (typeof key !== "string" || !key) {
-    log_error.writeErrorToFile(`Invalid config key type or empty string: ${typeof key}`);
+    log_error.writeErrorToFile(
+      `Invalid config key type or empty string: ${typeof key}`,
+    );
     return null;
   }
 
   const cached = configCache.get(key);
   const now = Date.now();
-  if (cached && (now - cached.timestamp < CACHE_TTL_MS)) {
+  if (cached && now - cached.timestamp < CACHE_TTL_MS) {
     return cached.value;
   }
 
@@ -68,9 +74,10 @@ async function getConfig(key) {
 
     configCache.set(key, { value: parsedValue, timestamp: now });
     return parsedValue;
-
   } catch (dbError) {
-    log_error.writeErrorToFile(`Database error in getConfig("${key}"): ${dbError.message}`);
+    log_error.writeErrorToFile(
+      `Database error in getConfig("${key}"): ${dbError.message}`,
+    );
 
     return cached ? cached.value : null;
   }

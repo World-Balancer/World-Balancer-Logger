@@ -106,7 +106,7 @@ async function getDefaultConfig() {
     Directories: { LogDirectory: logDirectory },
     Userid: {
       discord_id: "",
-    }
+    },
   };
 }
 
@@ -114,8 +114,16 @@ async function updateMissingKeys(defaultConfig, currentConfig, parentKey = "") {
   for (const [key, defaultValue] of Object.entries(defaultConfig)) {
     const currentKey = parentKey ? `${parentKey}.${key}` : key;
 
-    if (typeof defaultValue === "object" && defaultValue !== null && !Array.isArray(defaultValue)) {
-      await updateMissingKeys(defaultValue, currentConfig[key] || {}, currentKey);
+    if (
+      typeof defaultValue === "object" &&
+      defaultValue !== null &&
+      !Array.isArray(defaultValue)
+    ) {
+      await updateMissingKeys(
+        defaultValue,
+        currentConfig[key] || {},
+        currentKey,
+      );
     } else if (currentConfig[key] === undefined) {
       log(`Adding missing key: ${currentKey}`, "info");
       await Config.upsert({
@@ -204,7 +212,10 @@ function initAppWindow() {
 
 ipcMain.handle("get-user-data-path", () => app.getPath("userData"));
 ipcMain.handle("load-config", loadConfig);
-ipcMain.handle("save-config", async (_, config) => await saveConfigRecursively(config));
+ipcMain.handle(
+  "save-config",
+  async (_, config) => await saveConfigRecursively(config),
+);
 ipcMain.handle("get-app-version", () => version);
 
 app.on("ready", async () => {

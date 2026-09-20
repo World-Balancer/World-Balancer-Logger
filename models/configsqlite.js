@@ -44,7 +44,13 @@ function getUserDataPath() {
   if (platform === "win32") {
     return path.join(home, "AppData", "Roaming", pkg.name, "config");
   } else if (platform === "darwin") {
-    return path.join(home, "Library", "Application Support", pkg.name, "config");
+    return path.join(
+      home,
+      "Library",
+      "Application Support",
+      pkg.name,
+      "config",
+    );
   } else {
     return path.join(home, ".config", pkg.name, "config");
   }
@@ -54,7 +60,9 @@ const dbDir = getUserDataPath();
 const dbPath = path.join(dbDir, "config.sqlite");
 
 fs.promises.mkdir(dbDir, { recursive: true }).catch((err) => {
-  console.error(`Critical database directory footprint setup failed: ${err.message}`);
+  console.error(
+    `Critical database directory footprint setup failed: ${err.message}`,
+  );
 });
 
 const sequelize = new Sequelize({
@@ -65,11 +73,11 @@ const sequelize = new Sequelize({
     max: 1,
     min: 0,
     idle: 1000,
-    acquire: 5000
+    acquire: 5000,
   },
   dialectOptions: {
-    timeout: 5000
-  }
+    timeout: 5000,
+  },
 });
 
 module.exports = sequelize;

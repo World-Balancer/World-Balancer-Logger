@@ -47,7 +47,7 @@ const Config = sequelize.define(
         fields: ["keyid"],
       },
     ],
-  }
+  },
 );
 
 module.exports = Config;
