@@ -296,7 +296,7 @@ setInterval(() => {
   logToMain(
     `[Stats] queue=${queue.length} | processed=${processed} | failed=${failed} | running=${running ? "yes" : "no"}`,
   );
-}, 5000);
+}, 60 * 60 * 1000);
 
 function getQueueStats() {
   return { queue: queue.length, processed, failed, running };
