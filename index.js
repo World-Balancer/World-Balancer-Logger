@@ -36,6 +36,7 @@ const configDir = path.join(appInstallPath, "config");
 
 const getConfig = require("./models/getConfig.js");
 const { log_error } = require("./functions/logsclass.js");
+const { avatar_id_store } = require("./functions/avatarIdStore.js");
 
 const SWITCH_REGEX = /Switching\s+(.*?)\s+to.*avatar\s+(.*)/;
 const AVATAR_API_REGEX = /avatars\/(avtr_[a-f0-9-]+)/;
@@ -44,7 +45,7 @@ const AVATAR_API_REGEX = /avatars\/(avtr_[a-f0-9-]+)/;
 // than buffering an unbounded string in memory (e.g. corrupted/huge file).
 // Note: a chunk this size can cost several GB of actual process memory once
 // read into a JS string and split into lines (UTF-16 + array overhead).
-const MAX_CHUNK_BYTES = 1 * 1024 * 1024 * 1024; // 1 GB
+const MAX_CHUNK_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
 
 if (!fs.existsSync(logpath)) fs.mkdirSync(logpath, { recursive: true });
 if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
@@ -163,6 +164,12 @@ async function monitorAndSend() {
             const apiMatch = log.match(AVATAR_API_REGEX);
             if (apiMatch) {
               const avatarId = apiMatch[1];
+
+              const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
+              if (!isNewAvatarId) {
+                continue;
+              }
+
               main.log(`Found avatar ID via API: ${avatarId}`, "info", "main_log");
 
               enqueueLogAvatar(avatarId, "system_log");
