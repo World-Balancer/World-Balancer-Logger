@@ -40,6 +40,7 @@ const { avatar_id_store } = require("./functions/avatarIdStore.js");
 
 const SWITCH_REGEX = /Switching\s+(.*?)\s+to.*avatar\s+(.*)/;
 const AVATAR_API_REGEX = /avatars\/(avtr_[a-f0-9-]+)/;
+const ASSET_BUNDLE_REGEX = /\[AssetBundleDownloadManager\].*?(avtr_[a-f0-9-]+)/;
 
 // Safety cap: if a single new chunk somehow exceeds this, we bail rather
 // than buffering an unbounded string in memory (e.g. corrupted/huge file).
@@ -175,8 +176,11 @@ async function monitorAndSend() {
             }
 
             const apiMatch = log.match(AVATAR_API_REGEX);
-            if (apiMatch) {
-              const avatarId = apiMatch[1];
+            const assetBundleMatch = log.match(ASSET_BUNDLE_REGEX);
+            const avatarIdMatch = apiMatch || assetBundleMatch;
+
+            if (avatarIdMatch) {
+              const avatarId = avatarIdMatch[1];
 
               const isNewAvatarId =
                 await avatar_id_store.checkAndMark(avatarId);
@@ -185,7 +189,7 @@ async function monitorAndSend() {
               }
 
               main.log(
-                `Found avatar ID via API: ${avatarId}`,
+                `Found avatar ID: ${avatarId}`,
                 "info",
                 "main_log",
               );
