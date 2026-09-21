@@ -73,7 +73,7 @@ async function checkForNewFiles() {
 
     const logFileNames = await fs.promises.readdir(logDirectory);
     const newLogFileNames = logFileNames.filter(
-      (name) => name && name.startsWith("output_log"),
+      (name) => name?.startsWith("output_log"),
     );
 
     if (newLogFileNames.length > 0) {
