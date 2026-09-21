@@ -86,7 +86,7 @@ async function enqueueSwitchStatus(username, avatarName) {
       "main_log",
     );
   } catch (apiErr) {
-    let errorMsg = ``;
+    let errorMsg = "";
     if (apiErr.response) {
       errorMsg += ` | Status: ${apiErr.response.status} - ${JSON.stringify(apiErr.response.data)}`;
     }
