@@ -97,17 +97,17 @@ function flattenKeys(obj, parentKey = "") {
   return keys;
 }
 
-async function getDefaultConfig() {
+function getDefaultConfig() {
   const logDirectory = isWindows
     ? path.join(os.homedir(), "AppData", "LocalLow", "VRChat", "VRChat")
     : path.join(os.homedir(), ".Config", "VRChat", "VRChat");
 
-  return {
+  return Promise.resolve({
     Directories: { LogDirectory: logDirectory },
     Userid: {
       discord_id: "",
     },
-  };
+  });
 }
 
 async function updateMissingKeys(defaultConfig, currentConfig, parentKey = "") {
@@ -220,6 +220,7 @@ ipcMain.handle("get-app-version", () => version);
 
 app.on("ready", async () => {
   await initializeDatabase();
+  app.emit("db-ready");
   initAppWindow();
 });
 

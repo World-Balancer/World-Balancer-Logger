@@ -1,6 +1,6 @@
 {
   "name": "world-balancer-avatar-logger",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Logger",
   "main": "index.js",
   "bin": "index.js",
@@ -35,7 +35,7 @@
     "sqlite3": "^6.0.1"
   },
   "devDependencies": {
-    "electron": "^44.3.0",
+    "electron": "^44.4.2",
     "electron-builder": "^26.15.3"
   }
 }

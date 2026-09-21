@@ -83,7 +83,6 @@ const axiosInstance = axios.create({
   },
 });
 
-// ─── QUEUE STATE ─────────────────────────────────────────────
 const queue = [];
 const queuedSet = new Set();
 
@@ -116,7 +115,7 @@ async function sendBatch(batch, retryCount = 0) {
   });
 
   if (validItems.length === 0) {
-    logToMain(`[Batch] ⚠️ No valid items in batch! Skipping...`, "warn");
+    logToMain("[Batch] ⚠️ No valid items in batch! Skipping...", "warn");
     return;
   }
 
@@ -164,7 +163,7 @@ async function sendBatch(batch, retryCount = 0) {
       return sendBatch(batch, retryCount + 1);
     }
 
-    logToMain(`[Batch] Falling back to individual sends...`, "warn");
+    logToMain("[Batch] Falling back to individual sends...", "warn");
 
     for (const job of batch) {
       try {

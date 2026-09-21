@@ -26,7 +26,7 @@ const fs = require("fs");
 const path = require("path");
 
 class log_error {
-  static async writeErrorToFile(error) {
+  static writeErrorToFile(error) {
     const { logpath } = require("../Configfiles/config.js");
     const errorlog = path.join(logpath, "error.log");
     const timestamp = new Date().toISOString();

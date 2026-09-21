@@ -40,6 +40,7 @@ const { avatar_id_store } = require("./functions/avatarIdStore.js");
 
 const SWITCH_REGEX = /Switching\s+(.*?)\s+to.*avatar\s+(.*)/;
 const AVATAR_API_REGEX = /avatars\/(avtr_[a-f0-9-]+)/;
+const ASSET_BUNDLE_REGEX = /\[AssetBundleDownloadManager\].*?(avtr_[a-f0-9-]+)/;
 
 // Safety cap: if a single new chunk somehow exceeds this, we bail rather
 // than buffering an unbounded string in memory (e.g. corrupted/huge file).
@@ -71,8 +72,8 @@ async function checkForNewFiles() {
     }
 
     const logFileNames = await fs.promises.readdir(logDirectory);
-    const newLogFileNames = logFileNames.filter(
-      (name) => name && name.startsWith("output_log"),
+    const newLogFileNames = logFileNames.filter((name) =>
+      name?.startsWith("output_log"),
     );
 
     if (newLogFileNames.length > 0) {
@@ -103,7 +104,7 @@ async function checkForNewFiles() {
  * using a stream instead of loading the whole file into memory.
  * Returns [newCompleteLines, newLastReadPosition].
  */
-async function readNewLogs(fileSize) {
+function readNewLogs(fileSize) {
   return new Promise((resolve, reject) => {
     const bytesToRead = fileSize - lastReadPosition;
 
@@ -146,8 +147,10 @@ async function readNewLogs(fileSize) {
   });
 }
 
-async function monitorAndSend() {
+(async function monitorAndSend() {
   try {
+    await new Promise((resolve) => app.once("db-ready", resolve));
+
     while (true) {
       await checkForNewFiles();
 
@@ -175,8 +178,11 @@ async function monitorAndSend() {
             }
 
             const apiMatch = log.match(AVATAR_API_REGEX);
-            if (apiMatch) {
-              const avatarId = apiMatch[1];
+            const assetBundleMatch = log.match(ASSET_BUNDLE_REGEX);
+            const avatarIdMatch = apiMatch || assetBundleMatch;
+
+            if (avatarIdMatch) {
+              const avatarId = avatarIdMatch[1];
 
               const isNewAvatarId =
                 await avatar_id_store.checkAndMark(avatarId);
@@ -184,11 +190,7 @@ async function monitorAndSend() {
                 continue;
               }
 
-              main.log(
-                `Found avatar ID via API: ${avatarId}`,
-                "info",
-                "main_log",
-              );
+              main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
 
               enqueueLogAvatar(avatarId, "system_log");
             }
@@ -211,9 +213,7 @@ async function monitorAndSend() {
   } catch (error) {
     reportError(`Error stack of monitor of VRChat: ${error.message}`, true);
   }
-}
-
-monitorAndSend();
+})();
 
 process.on("uncaughtException", (err, origin) => {
   reportError(

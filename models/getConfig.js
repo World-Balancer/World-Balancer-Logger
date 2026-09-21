@@ -28,12 +28,13 @@ const { log_error } = require("../functions/logsclass");
 const configCache = new Map();
 const CACHE_TTL_MS = 5000;
 
-function safeJsonParse(rawValue) {
+const safeJsonParse = (rawValue) => {
   if (rawValue === null || rawValue === undefined) return null;
-
   if (typeof rawValue !== "string") return rawValue;
 
   const trimmed = rawValue.trim();
+  if (!trimmed) return null;
+
   if (!(
     trimmed.startsWith("{") ||
     trimmed.startsWith("[") ||
@@ -43,13 +44,15 @@ function safeJsonParse(rawValue) {
   }
 
   try {
-    return JSON.parse(rawValue);
+    const parsed = JSON.parse(rawValue);
+    if (parsed === "") return null;
+    return parsed;
   } catch {
     return rawValue;
   }
-}
+};
 
-async function getConfig(key) {
+const getConfig = async (key) => {
   if (typeof key !== "string" || !key) {
     log_error.writeErrorToFile(
       `Invalid config key type or empty string: ${typeof key}`,
@@ -59,7 +62,11 @@ async function getConfig(key) {
 
   const cached = configCache.get(key);
   const now = Date.now();
-  if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+  if (
+    cached &&
+    cached.value !== null &&
+    now - cached.timestamp < CACHE_TTL_MS
+  ) {
     return cached.value;
   }
 
@@ -71,16 +78,14 @@ async function getConfig(key) {
     }
 
     const parsedValue = safeJsonParse(config.value);
-
     configCache.set(key, { value: parsedValue, timestamp: now });
     return parsedValue;
   } catch (dbError) {
     log_error.writeErrorToFile(
       `Database error in getConfig("${key}"): ${dbError.message}`,
     );
-
     return cached ? cached.value : null;
   }
-}
+};
 
 module.exports = getConfig;
