@@ -72,8 +72,8 @@ async function checkForNewFiles() {
     }
 
     const logFileNames = await fs.promises.readdir(logDirectory);
-    const newLogFileNames = logFileNames.filter(
-      (name) => name?.startsWith("output_log"),
+    const newLogFileNames = logFileNames.filter((name) =>
+      name?.startsWith("output_log"),
     );
 
     if (newLogFileNames.length > 0) {
@@ -147,7 +147,7 @@ function readNewLogs(fileSize) {
   });
 }
 
-async function monitorAndSend() {
+(async function monitorAndSend() {
   try {
     while (true) {
       await checkForNewFiles();
@@ -188,11 +188,7 @@ async function monitorAndSend() {
                 continue;
               }
 
-              main.log(
-                `Found avatar ID: ${avatarId}`,
-                "info",
-                "main_log",
-              );
+              main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
 
               enqueueLogAvatar(avatarId, "system_log");
             }
@@ -215,9 +211,7 @@ async function monitorAndSend() {
   } catch (error) {
     reportError(`Error stack of monitor of VRChat: ${error.message}`, true);
   }
-}
-
-monitorAndSend();
+})();
 
 process.on("uncaughtException", (err, origin) => {
   reportError(
