@@ -104,7 +104,7 @@ async function checkForNewFiles() {
  * using a stream instead of loading the whole file into memory.
  * Returns [newCompleteLines, newLastReadPosition].
  */
-async function readNewLogs(fileSize) {
+function readNewLogs(fileSize) {
   return new Promise((resolve, reject) => {
     const bytesToRead = fileSize - lastReadPosition;
 
