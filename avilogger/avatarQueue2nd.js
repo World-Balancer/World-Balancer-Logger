@@ -69,15 +69,30 @@ function reportError(message, emitToMain = false) {
  */
 async function enqueueSwitchStatus(username, avatarName) {
   try {
-    const discordId = await getConfig("Userid.discord_id");
+    const raw = await getConfig("Userid.discord_id");
+
+    let discordId;
+    try {
+      discordId = JSON.parse(raw);
+    } catch {
+      discordId = raw;
+    }
+
+    const isValidDiscordId =
+      discordId !== null &&
+      discordId !== undefined &&
+      discordId !== "" &&
+      (typeof discordId === "string" || typeof discordId === "number");
+
+    const payload = {
+      username,
+      avatarName,
+      ...(isValidDiscordId && { discordId }),
+    };
 
     await axiosInstance.post(
       "https://aswb.worldbalancer.com/v9/api/avatar-check",
-      {
-        username,
-        avatarName,
-        discordId,
-      },
+      payload,
     );
 
     main.log(
@@ -90,6 +105,7 @@ async function enqueueSwitchStatus(username, avatarName) {
     if (apiErr.response) {
       errorMsg += ` | Status: ${apiErr.response.status} - ${JSON.stringify(apiErr.response.data)}`;
     }
+    console.error(errorMsg);
     reportError(errorMsg, true);
   }
 }

@@ -220,6 +220,7 @@ ipcMain.handle("get-app-version", () => version);
 
 app.on("ready", async () => {
   await initializeDatabase();
+  app.emit("db-ready");
   initAppWindow();
 });
 
