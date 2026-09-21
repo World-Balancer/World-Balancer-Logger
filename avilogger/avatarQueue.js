@@ -83,7 +83,6 @@ const axiosInstance = axios.create({
   },
 });
 
-// ─── QUEUE STATE ─────────────────────────────────────────────
 const queue = [];
 const queuedSet = new Set();
 
