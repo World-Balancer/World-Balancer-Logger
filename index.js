@@ -147,15 +147,9 @@ function readNewLogs(fileSize) {
   });
 }
 
-function waitForDbReady() {
-  return new Promise((resolve) => {
-    app.once("db-ready", resolve);
-  });
-}
-
 (async function monitorAndSend() {
   try {
-    await waitForDbReady();
+    await new Promise((resolve) => app.once("db-ready", resolve));
 
     while (true) {
       await checkForNewFiles();

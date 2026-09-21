@@ -28,7 +28,7 @@ const { log_error } = require("../functions/logsclass");
 const configCache = new Map();
 const CACHE_TTL_MS = 5000;
 
-function safeJsonParse(rawValue) {
+const safeJsonParse = (rawValue) => {
   if (rawValue === null || rawValue === undefined) return null;
   if (typeof rawValue !== "string") return rawValue;
 
@@ -50,9 +50,9 @@ function safeJsonParse(rawValue) {
   } catch {
     return rawValue;
   }
-}
+};
 
-async function getConfig(key) {
+const getConfig = async (key) => {
   if (typeof key !== "string" || !key) {
     log_error.writeErrorToFile(
       `Invalid config key type or empty string: ${typeof key}`,
@@ -86,6 +86,6 @@ async function getConfig(key) {
     );
     return cached ? cached.value : null;
   }
-}
+};
 
 module.exports = getConfig;
