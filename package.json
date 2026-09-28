@@ -1,6 +1,6 @@
 {
   "name": "world-balancer-avatar-logger",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Logger",
   "main": "index.js",
   "bin": "index.js",

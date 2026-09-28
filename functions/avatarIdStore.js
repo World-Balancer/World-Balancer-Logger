@@ -82,7 +82,7 @@ class avatar_id_store {
       })();
     }
 
-    return avatar_id_store._loadPromise;
+    return await avatar_id_store._loadPromise;
   }
 
   /**
@@ -141,7 +141,7 @@ class avatar_id_store {
         avatar_id_store._flushInFlight = null;
       });
 
-    return avatar_id_store._flushInFlight;
+    return await avatar_id_store._flushInFlight;
   }
 
   /**
