@@ -24,11 +24,11 @@ SOFTWARE.
 
 const fs = require("fs");
 const path = require("path");
-const { app } = require("electron");
+const { getDataDir } = require("../paths");
 const Config = require("../models/Config");
 const { log_error } = require("../functions/logsclass.js");
 
-const appInstallPath = app.getPath("userData");
+const appInstallPath = getDataDir();
 const logDir = path.join(appInstallPath, "log");
 const configDir = path.join(appInstallPath, "config");
 

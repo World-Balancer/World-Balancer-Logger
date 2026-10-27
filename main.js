@@ -25,25 +25,21 @@ SOFTWARE.
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const fs = require("fs").promises;
+const fsSync = require("fs");
 const os = require("os");
+const { getDatabasePath, getDataDir } = require("./paths");
 const sequelize = require("./models/configsqlite");
 const Config = require("./models/Config");
-const { version, name: appName } = require("./package.json");
+const { version } = require("./package.json");
+const { avatar_id_store } = require("./functions/avatarIdStore.js");
 
 const isWindows = process.platform === "win32";
 let mainWindow = null;
 let logQueue = [];
 
-function getDatabasePath() {
-  const baseDir = isWindows
-    ? path.join(process.env.APPDATA || "", appName, "config")
-    : path.join(os.homedir(), `.${appName}`, "config");
-  return path.join(baseDir, "config.sqlite");
-}
-
 async function doesDatabaseExist() {
   try {
-    await fs.access(getDatabasePath(), fs.constants.F_OK);
+    await fs.access(getDatabasePath(), fsSync.constants.F_OK);
     return true;
   } catch {
     return false;
@@ -210,7 +206,7 @@ function initAppWindow() {
   });
 }
 
-ipcMain.handle("get-user-data-path", () => app.getPath("userData"));
+ipcMain.handle("get-user-data-path", () => getDataDir());
 ipcMain.handle("load-config", loadConfig);
 ipcMain.handle(
   "save-config",
@@ -234,5 +230,7 @@ app.on("activate", async () => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+app.on("before-quit", () => avatar_id_store.flushSync());
 
 module.exports = { log };

@@ -23,47 +23,9 @@ SOFTWARE.
 */
 
 const { Sequelize } = require("sequelize");
-const path = require("path");
-const fs = require("fs");
-const os = require("os");
-const pkg = require("../package.json");
+const { ensureDatabase } = require("../paths");
 
-function getUserDataPath() {
-  try {
-    const { app } = require("electron");
-    if (app && typeof app.getPath === "function") {
-      return path.join(app.getPath("userData"), "config");
-    }
-  } catch {
-    // empty
-  }
-
-  const platform = process.platform;
-  const home = os.homedir();
-
-  if (platform === "win32") {
-    return path.join(home, "AppData", "Roaming", pkg.name, "config");
-  } else if (platform === "darwin") {
-    return path.join(
-      home,
-      "Library",
-      "Application Support",
-      pkg.name,
-      "config",
-    );
-  } else {
-    return path.join(home, ".config", pkg.name, "config");
-  }
-}
-
-const dbDir = getUserDataPath();
-const dbPath = path.join(dbDir, "config.sqlite");
-
-fs.promises.mkdir(dbDir, { recursive: true }).catch((err) => {
-  console.error(
-    `Critical database directory footprint setup failed: ${err.message}`,
-  );
-});
+const dbPath = ensureDatabase();
 
 const sequelize = new Sequelize({
   dialect: "sqlite",

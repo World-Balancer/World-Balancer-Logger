@@ -26,11 +26,12 @@ const fs = require("fs");
 const path = require("path");
 const main = require("./main");
 const { app } = require("electron");
+const { getDataDir } = require("./paths");
 
 const { enqueueLogAvatar } = require("./avilogger/avatarQueue.js");
 const { enqueueSwitchStatus } = require("./avilogger/avatarQueue2nd.js");
 
-const appInstallPath = app.getPath("userData");
+const appInstallPath = getDataDir();
 const logpath = path.join(appInstallPath, "log");
 const configDir = path.join(appInstallPath, "config");
 
@@ -219,6 +220,7 @@ process.on("uncaughtException", (err, origin) => {
   reportError(
     `Uncaught Exception at: ${new Date().toISOString()}\nError: ${err.message}\nStack: ${err.stack}\nOrigin: ${origin}`,
   );
+  avatar_id_store.flushSync(); // save buffered avatar IDs before exiting
   setTimeout(() => process.exit(1), 100);
 });
 

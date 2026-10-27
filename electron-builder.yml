@@ -9,5 +9,6 @@ win:
 
 nsis:
   oneClick: false
+  perMachine: false
   allowToChangeInstallationDirectory: true
   license: license.txt
