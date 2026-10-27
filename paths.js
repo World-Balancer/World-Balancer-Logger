@@ -94,7 +94,21 @@ function getDataDir() {
   // write to wins; unusable ones are reported and skipped, never thrown.
   const candidates = [];
 
-  // 1) Explicit override
+  // 1) Explicit override, read from THIS process's environment only.
+  //
+  //    On Windows, `setx WB_DATA_DIR "D:\WorldBalancer"` saves the variable for
+  //    FUTURE processes. It does not change the PowerShell window, Command
+  //    Prompt or Explorer that is already running, and anything launched from
+  //    them inherits the old environment, so the override is silently missed
+  //    and the app falls back to another data folder.
+  //    Either:
+  //      - set it in the launching shell first, then start the app from it:
+  //          PowerShell:  $env:WB_DATA_DIR = "D:\WorldBalancer"; & ".\World Balancer.exe"
+  //          cmd.exe:     set WB_DATA_DIR=D:\WorldBalancer && "World Balancer.exe"
+  //      - or run `setx` and then close and reopen that terminal (and, for
+  //        launches from the desktop or Start menu, sign out and back in or
+  //        restart Explorer) before starting the app.
+  //    When the override is set but unusable, getDataDirWarnings() says so.
   if (process.env.WB_DATA_DIR) {
     candidates.push({
       dir: path.resolve(process.env.WB_DATA_DIR),
