@@ -22,12 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs").promises;
 const fsSync = require("fs");
 const os = require("os");
-const { getDatabasePath, getDataDir } = require("./paths");
+const { getDatabasePath, getDataDir, getDataDirWarnings } = require("./paths");
 
 // ensureDatabase() runs when configsqlite is first loaded and throws if an
 // existing database cannot be migrated. Show the reason and quit instead of
@@ -226,6 +226,11 @@ ipcMain.handle(
 ipcMain.handle("get-app-version", () => version);
 
 app.on("ready", async () => {
+  // Folder problems found while choosing the data folder (unavailable
+  // WB_DATA_DIR, no write permission...). They were collected instead of
+  // thrown, so surface them now that logging and the window exist.
+  for (const warning of getDataDirWarnings()) log(warning, "warn");
+
   await initializeDatabase();
   app.emit("db-ready");
   initAppWindow();
@@ -242,6 +247,41 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => avatar_id_store.flushSync());
+// Give in-flight uploads a short time to finish (so they are confirmed and
+// saved), then wait for any running disk write before the app really exits.
+// flushSync() is the fallback if that takes too long or fails.
+const QUIT_FLUSH_TIMEOUT_MS = 5000;
+let quitFlushStarted = false;
+
+app.on("before-quit", (event) => {
+  if (quitFlushStarted) {
+    avatar_id_store.flushSync(); // second pass: nothing may be left outstanding
+    return;
+  }
+  quitFlushStarted = true;
+  event.preventDefault();
+
+  let timer;
+  const flush = (async () => {
+    // Required lazily: avatarQueue requires this module, so a top-level
+    // require here would hand it a half-loaded `main`.
+    const { waitForIdle } = require("./avilogger/avatarQueue.js");
+    await waitForIdle(3000);
+    await avatar_id_store.flushAll();
+  })();
+
+  Promise.race([
+    flush,
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, QUIT_FLUSH_TIMEOUT_MS);
+    }),
+  ])
+    .catch((err) => console.error("Shutdown flush failed:", err.message))
+    .finally(() => {
+      clearTimeout(timer);
+      avatar_id_store.flushSync();
+      app.quit(); // runs this handler again, which now returns immediately
+    });
+});
 
 module.exports = { log };
