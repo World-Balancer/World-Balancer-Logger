@@ -37,6 +37,31 @@ function getDocumentsDir() {
   }
 }
 
+// Per-user folder outside the install directory (e.g. %APPDATA%\<app name>).
+// Unlike the install folder, the NSIS uninstaller/updater does not touch it.
+function getUserDataDir() {
+  try {
+    const { app } = require("electron");
+    if (app && app.isPackaged) return app.getPath("userData");
+  } catch {
+    // not running in Electron
+  }
+  return null;
+}
+
+// Where a packaged app used to keep data: beside the executable.
+function getLegacyInstallDataDir() {
+  try {
+    const { app } = require("electron");
+    if (app && app.isPackaged) {
+      return path.join(path.dirname(process.execPath), "data");
+    }
+  } catch {
+    // not running in Electron
+  }
+  return null;
+}
+
 function isWritable(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -56,19 +81,23 @@ function getDataDir() {
     return path.join(process.env.PORTABLE_EXECUTABLE_DIR, "data");
   }
 
-  // 3) Installed app: follow the folder chosen in the installer
-  try {
-    const { app } = require("electron");
-    if (app && app.isPackaged) {
-      const installData = path.join(path.dirname(process.execPath), "data");
-      if (isWritable(installData)) return installData;
-    }
-  } catch {
-    // not running in Electron
-  }
+  // 3) Installed app: a persistent per-user folder OUTSIDE the install
+  //    directory, so uninstalling or upgrading never deletes the data.
+  const userData = getUserDataDir();
+  if (userData && isWritable(userData)) return userData;
 
-  // 4) Dev mode, or install folder not writable (e.g. Program Files)
+  // 4) Dev mode, or the user data folder is not writable
   return getDocumentsDir();
+}
+
+// Earlier locations of the data folder, oldest layout last. Their contents
+// are copied into the current folder once (see ensureDatabase).
+function getLegacyDataDirs() {
+  const current = getDataDir();
+  return [getLegacyInstallDataDir(), getDocumentsDir()].filter(
+    (dir, i, all) =>
+      dir && dir !== current && all.indexOf(dir) === i && fs.existsSync(dir),
+  );
 }
 
 function getOldDatabaseCandidates() {
@@ -84,7 +113,14 @@ function getOldDatabaseCandidates() {
       list.push(path.join(appData, n, "config", "config.sqlite"));
     } else if (process.platform === "darwin") {
       list.push(
-        path.join(home, "Library", "Application Support", n, "config", "config.sqlite"),
+        path.join(
+          home,
+          "Library",
+          "Application Support",
+          n,
+          "config",
+          "config.sqlite",
+        ),
       );
     } else {
       list.push(path.join(home, ".config", n, "config", "config.sqlite"));
@@ -104,11 +140,14 @@ function migrateLogs() {
   if (fs.existsSync(newLog)) return;
 
   // ...\config\config.sqlite -> ...\log\seen_avatar_ids.txt
-  const oldFile = getOldDatabaseCandidates()
-    .map((p) =>
+  const oldFile = [
+    ...getLegacyDataDirs().map((d) =>
+      path.join(d, "log", "seen_avatar_ids.txt"),
+    ),
+    ...getOldDatabaseCandidates().map((p) =>
       path.join(path.dirname(path.dirname(p)), "log", "seen_avatar_ids.txt"),
-    )
-    .find((p) => p !== newLog && fs.existsSync(p));
+    ),
+  ].find((p) => p !== newLog && fs.existsSync(p));
 
   if (oldFile) {
     try {
@@ -126,9 +165,12 @@ function ensureDatabase() {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   if (!fs.existsSync(dbPath)) {
-    const oldDb = getOldDatabaseCandidates().find(
-      (p) => p !== dbPath && fs.existsSync(p),
-    );
+    const oldDb = [
+      ...getLegacyDataDirs().map((d) =>
+        path.join(d, "config", "config.sqlite"),
+      ),
+      ...getOldDatabaseCandidates(),
+    ].find((p) => p !== dbPath && fs.existsSync(p));
     if (oldDb) {
       try {
         fs.copyFileSync(oldDb, dbPath); // copy, so the old file stays as a backup

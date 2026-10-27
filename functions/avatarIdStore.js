@@ -45,7 +45,13 @@ class avatar_id_store {
   static _storePath = null;
   static _loadPromise = null;
 
+  // Persisted only after the upload succeeded (confirm()), so an interrupted
+  // upload is never saved as "seen" and is picked up again after a restart.
   static _pendingWrites = [];
+
+  // IDs marked as seen in memory whose upload has not been confirmed yet.
+  // They block duplicates during this session but are never written to disk.
+  static _unconfirmed = new Set();
   static _flushTimer = null;
   static _flushInFlight = null; // the running append OR rewrite disk write
   static _rewriteTimer = null;
@@ -74,8 +80,15 @@ class avatar_id_store {
   static _writeFullSync() {
     const storePath = avatar_id_store._getStorePath();
     fs.mkdirSync(path.dirname(storePath), { recursive: true });
-    const ids = [...avatar_id_store._seenIds];
+    const ids = avatar_id_store._persistableIds();
     fs.writeFileSync(storePath, ids.length ? ids.join("\n") + "\n" : "");
+  }
+
+  /** Seen IDs that are safe to persist (upload confirmed). */
+  static _persistableIds() {
+    return [...avatar_id_store._seenIds].filter(
+      (id) => !avatar_id_store._unconfirmed.has(id),
+    );
   }
 
   static _repairAfterLateWrite() {
@@ -83,7 +96,10 @@ class avatar_id_store {
     try {
       avatar_id_store._writeFullSync();
     } catch (err) {
-      console.error("[avatar_id_store] post-shutdown repair failed:", err.message);
+      console.error(
+        "[avatar_id_store] post-shutdown repair failed:",
+        err.message,
+      );
     }
   }
 
@@ -312,7 +328,22 @@ class avatar_id_store {
       await avatar_id_store.clear();
     }
 
+    // Remembered in memory right away (dedup), but only written to disk once
+    // confirm() reports that the upload succeeded.
     avatar_id_store._seenIds.add(avatarId);
+    avatar_id_store._unconfirmed.add(avatarId);
+
+    return true;
+  }
+
+  /**
+   * Call after the avatar was uploaded successfully: now it is safe to
+   * persist, so a restart will not send it again.
+   */
+  static confirm(avatarId) {
+    if (!avatar_id_store._unconfirmed.delete(avatarId)) return;
+    if (!avatar_id_store._seenIds?.has(avatarId)) return; // unmarked/cleared meanwhile
+
     avatar_id_store._pendingWrites.push(avatarId);
 
     if (avatar_id_store._pendingWrites.length >= FLUSH_BATCH_SIZE) {
@@ -320,8 +351,6 @@ class avatar_id_store {
     } else {
       avatar_id_store._scheduleFlush();
     }
-
-    return true;
   }
 
   /**
@@ -337,6 +366,9 @@ class avatar_id_store {
   static async unmark(avatarId) {
     const seenIds = await avatar_id_store._load();
     if (!seenIds.delete(avatarId)) return;
+
+    // Upload never confirmed: it was never written to disk, nothing to rewrite.
+    if (avatar_id_store._unconfirmed.delete(avatarId)) return;
 
     // Not written to disk yet: just drop it from the buffer.
     const idx = avatar_id_store._pendingWrites.indexOf(avatarId);
@@ -380,7 +412,7 @@ class avatar_id_store {
     if (!avatar_id_store._seenIds) return;
 
     const storePath = avatar_id_store._getStorePath();
-    const ids = [...avatar_id_store._seenIds];
+    const ids = avatar_id_store._persistableIds();
     const data = ids.length ? ids.join("\n") + "\n" : "";
     // The snapshot already contains everything that was pending.
     avatar_id_store._pendingWrites = [];
@@ -424,6 +456,7 @@ class avatar_id_store {
     }
 
     avatar_id_store._seenIds = new Set();
+    avatar_id_store._unconfirmed = new Set();
     avatar_id_store._pendingWrites = [];
 
     const storePath = avatar_id_store._getStorePath();

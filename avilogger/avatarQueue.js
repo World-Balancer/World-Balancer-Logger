@@ -122,7 +122,11 @@ function failJob(job, reason) {
 
 function retryWaitMs(err, attempt) {
   const retryAfter = Number(err.response?.headers?.["retry-after"]);
-  if (err.response?.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
+  if (
+    err.response?.status === 429 &&
+    Number.isFinite(retryAfter) &&
+    retryAfter > 0
+  ) {
     return Math.min(retryAfter * 1000, MAX_RETRY_WAIT);
   }
   return RETRY_DELAY * (attempt + 1);
@@ -131,7 +135,10 @@ function retryWaitMs(err, attempt) {
 async function sendBatch(batch) {
   const validItems = batch.filter((j) => {
     if (!j || typeof j !== "object") {
-      logToMain(`[Batch] Skipping invalid job object: ${JSON.stringify(j)}`, "warn");
+      logToMain(
+        `[Batch] Skipping invalid job object: ${JSON.stringify(j)}`,
+        "warn",
+      );
       return false;
     }
     if (!j.avatarId || typeof j.avatarId !== "string") {
@@ -165,7 +172,9 @@ async function sendBatch(batch) {
       const res = await axiosInstance.post(API_URL, payload);
 
       processed += validItems.length;
-      logToMain(`[Batch] SUCCESS → ${validItems.length} avatars | status=${res.status}`);
+      logToMain(
+        `[Batch] SUCCESS → ${validItems.length} avatars | status=${res.status}`,
+      );
 
       for (const job of validItems) {
         job.onSuccess?.(job.avatarId);
@@ -175,7 +184,8 @@ async function sendBatch(batch) {
       lastErr = err;
       const status = err.response?.status;
       const isNetwork = NETWORK_ERROR_CODES.has(err.code);
-      const retryable = isNetwork || status === 429 || (status >= 500 && status <= 599);
+      const retryable =
+        isNetwork || status === 429 || (status >= 500 && status <= 599);
 
       reportError(
         `[Batch] FAILED → ${validItems.length} avatars | code=${err.code} | status=${status || "N/A"} | ${err.message}`,
@@ -201,7 +211,10 @@ async function sendBatch(batch) {
     return;
   }
 
-  logToMain("[Batch] Server error. Falling back to individual sends...", "warn");
+  logToMain(
+    "[Batch] Server error. Falling back to individual sends...",
+    "warn",
+  );
 
   for (const job of validItems) {
     try {
@@ -329,23 +342,49 @@ async function enqueueLogAvatar(avatarId) {
   enqueueAvatar({
     avatarId,
     userid: discordId,
-    onSuccess: (id) => logToMain(`[LogSync] Synced extracted ID: ${id}`),
+    onSuccess: (id) => {
+      logToMain(`[LogSync] Synced extracted ID: ${id}`);
+      // Only now is the ID saved to disk; until then a quit/crash just means
+      // it gets sent again after restart.
+      avatar_id_store.confirm(id);
+    },
     onFail: (id, err) => {
       logToMain(`[LogSync] Sync error on ${id}: ${err}`, "warn");
       // Forget the ID so the next time it appears in the log it is sent again.
       avatar_id_store
         .unmark(id)
-        .catch((e) => reportError(`[LogSync] unmark failed for ${id}: ${e.message}`));
+        .catch((e) =>
+          reportError(`[LogSync] unmark failed for ${id}: ${e.message}`),
+        );
     },
   });
 }
 
-const statsTimer = setInterval(() => {
-  logToMain(
-    `[Stats] queue=${queue.length} | processed=${processed} | failed=${failed} | running=${running ? "yes" : "no"}`,
-  );
-}, 60 * 60 * 1000);
+const statsTimer = setInterval(
+  () => {
+    logToMain(
+      `[Stats] queue=${queue.length} | processed=${processed} | failed=${failed} | running=${running ? "yes" : "no"}`,
+    );
+  },
+  60 * 60 * 1000,
+);
 if (statsTimer.unref) statsTimer.unref();
+
+/**
+ * Resolves once the queue is empty and the worker is idle, or after
+ * timeoutMs, whichever comes first. For "before-quit": a best-effort drain.
+ * Nothing depends on it finishing, since unconfirmed IDs are not persisted.
+ */
+async function waitForIdle(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (
+    (running || workerStarting || queue.length > 0) &&
+    Date.now() < deadline
+  ) {
+    await sleep(100);
+  }
+  return !(running || workerStarting || queue.length > 0);
+}
 
 function getQueueStats() {
   return { queue: queue.length, processed, failed, running };
@@ -355,4 +394,5 @@ module.exports = {
   enqueueAvatar,
   enqueueLogAvatar,
   getQueueStats,
+  waitForIdle,
 };
