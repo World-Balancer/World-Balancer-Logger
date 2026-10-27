@@ -242,7 +242,7 @@ class avatar_id_store {
         continue;
       }
       if (avatar_id_store._activeOps.size > 0) {
-        await Promise.allSettled([...avatar_id_store._activeOps]);
+        await Promise.allSettled(avatar_id_store._activeOps);
         continue;
       }
 

@@ -169,67 +169,59 @@ function retryWaitMs(err, attempt) {
   return RETRY_DELAY * (attempt + 1);
 }
 
-async function sendBatch(batch) {
-  const validItems = batch.filter((j) => {
-    if (!j || typeof j !== "object") {
-      logToMain(
-        `[Batch] Skipping invalid job object: ${JSON.stringify(j)}`,
-        "warn",
-      );
-      return false;
-    }
-    if (!j.avatarId || typeof j.avatarId !== "string") {
-      logToMain(`[Batch] Skipping invalid avatarId: ${j.avatarId}`, "warn");
-      return false;
-    }
-    if (!j.userid || typeof j.userid !== "string") {
-      logToMain(`[Batch] Skipping invalid userid: ${j.userid}`, "warn");
-      return false;
-    }
-    return true;
-  });
-
-  if (validItems.length === 0) {
-    logToMain("[Batch] No valid items in batch! Skipping...", "warn");
-    return;
+function isValidBatchItem(j) {
+  if (!j || typeof j !== "object") {
+    logToMain(
+      `[Batch] Skipping invalid job object: ${JSON.stringify(j)}`,
+      "warn",
+    );
+    return false;
   }
+  if (!j.avatarId || typeof j.avatarId !== "string") {
+    logToMain(`[Batch] Skipping invalid avatarId: ${j.avatarId}`, "warn");
+    return false;
+  }
+  if (!j.userid || typeof j.userid !== "string") {
+    logToMain(`[Batch] Skipping invalid userid: ${j.userid}`, "warn");
+    return false;
+  }
+  return true;
+}
 
-  const payload = {
-    avatars: validItems.map((j) => ({ id: j.avatarId, userid: j.userid })),
-  };
+function buildPayload(items) {
+  return { avatars: items.map((j) => ({ id: j.avatarId, userid: j.userid })) };
+}
 
+function isRetryable(err) {
+  const status = err.response?.status;
+  return (
+    NETWORK_ERROR_CODES.has(err.code) ||
+    status === 429 ||
+    (status >= 500 && status <= 599)
+  );
+}
+
+// POSTs the payload, retrying transient errors.
+// Returns { res } on success or { err } once retries are exhausted / not retryable.
+async function postWithRetries(payload, validCount, totalCount) {
   let lastErr = null;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const retryLabel = attempt > 0 ? `(retry ${attempt}/${MAX_RETRIES})` : "";
     logToMain(
-      `[Batch] Sending ${validItems.length}/${batch.length} valid avatars ${attempt > 0 ? `(retry ${attempt}/${MAX_RETRIES})` : ""}`,
+      `[Batch] Sending ${validCount}/${totalCount} valid avatars ${retryLabel}`,
     );
 
     try {
-      const res = await axiosInstance.post(API_URL, payload);
-
-      processed += validItems.length;
-      logToMain(
-        `[Batch] SUCCESS → ${validItems.length} avatars | status=${res.status}`,
-      );
-
-      for (const job of validItems) {
-        job.onSuccess?.(job.avatarId);
-      }
-      return;
+      return { res: await axiosInstance.post(API_URL, payload) };
     } catch (err) {
       lastErr = err;
-      const status = err.response?.status;
-      const isNetwork = NETWORK_ERROR_CODES.has(err.code);
-      const retryable =
-        isNetwork || status === 429 || (status >= 500 && status <= 599);
-
       reportError(
-        `[Batch] FAILED → ${validItems.length} avatars | code=${err.code} | status=${status || "N/A"} | ${err.message}`,
+        `[Batch] FAILED → ${validCount} avatars | code=${err.code} | status=${err.response?.status || "N/A"} | ${err.message}`,
       );
 
-      if (!retryable) break; // 400/401/403/404...: retrying or splitting won't help
-      if (attempt === MAX_RETRIES) break;
+      // 400/401/403/404...: retrying or splitting won't help
+      if (!isRetryable(err) || attempt === MAX_RETRIES) break;
 
       const waitTime = retryWaitMs(err, attempt);
       reportError(`[Batch] Retryable error. Retrying in ${waitTime}ms...`);
@@ -237,38 +229,20 @@ async function sendBatch(batch) {
     }
   }
 
-  // Retries are over. A 5xx, or a 400/413/422 that may come from one bad
-  // member, can hide items the server would accept alone, so try the items
-  // one by one. Other errors (401/403/404/429...) affect every item equally.
-  const status = lastErr?.response?.status;
-  const serverError = status >= 500 && status <= 599;
-  const memberReject = MEMBER_REJECT_STATUSES.has(status);
+  return { err: lastErr };
+}
 
-  if (!serverError && !memberReject) {
-    const reason = lastErr?.message || "Unknown error";
-    for (const job of validItems) failJob(job, reason);
-    return;
-  }
+function markBatchSucceeded(items, res) {
+  processed += items.length;
+  logToMain(`[Batch] SUCCESS → ${items.length} avatars | status=${res.status}`);
+  for (const job of items) job.onSuccess?.(job.avatarId);
+}
 
-  // A single item that was rejected has nobody to be separated from.
-  if (validItems.length === 1) {
-    const job = validItems[0];
-    const reason = lastErr?.message || "Unknown error";
-    if (memberReject) rejectJob(job, reason);
-    else failJob(job, reason);
-    return;
-  }
-
-  logToMain(
-    `[Batch] ${serverError ? "Server error" : `Rejected (${status})`}. Falling back to individual sends...`,
-    "warn",
-  );
-
-  for (const job of validItems) {
+// Sends each item alone so one bad member can't sink the rest.
+async function sendIndividually(items) {
+  for (const job of items) {
     try {
-      await axiosInstance.post(API_URL, {
-        avatars: [{ id: job.avatarId, userid: job.userid }],
-      });
+      await axiosInstance.post(API_URL, buildPayload([job]));
 
       processed++;
       logToMain(`[Fallback] SUCCESS → ${job.avatarId}`);
@@ -284,6 +258,55 @@ async function sendBatch(batch) {
     }
     await sleep(100);
   }
+}
+
+// Retries are over. A 5xx, or a 400/413/422 that may come from one bad
+// member, can hide items the server would accept alone, so try them one by
+// one. Other errors (401/403/404/429...) affect every item equally.
+async function handleBatchFailure(items, err) {
+  const status = err?.response?.status;
+  const serverError = status >= 500 && status <= 599;
+  const memberReject = MEMBER_REJECT_STATUSES.has(status);
+  const reason = err?.message || "Unknown error";
+
+  if (!serverError && !memberReject) {
+    for (const job of items) failJob(job, reason);
+    return;
+  }
+
+  // A single item that was rejected has nobody to be separated from.
+  if (items.length === 1) {
+    if (memberReject) rejectJob(items[0], reason);
+    else failJob(items[0], reason);
+    return;
+  }
+
+  logToMain(
+    `[Batch] ${serverError ? "Server error" : `Rejected (${status})`}. Falling back to individual sends...`,
+    "warn",
+  );
+  await sendIndividually(items);
+}
+
+async function sendBatch(batch) {
+  const validItems = batch.filter(isValidBatchItem);
+
+  if (validItems.length === 0) {
+    logToMain("[Batch] No valid items in batch! Skipping...", "warn");
+    return;
+  }
+
+  const { res, err } = await postWithRetries(
+    buildPayload(validItems),
+    validItems.length,
+    batch.length,
+  );
+
+  if (res) {
+    markBatchSucceeded(validItems, res);
+    return;
+  }
+  await handleBatchFailure(validItems, err);
 }
 
 async function worker() {
