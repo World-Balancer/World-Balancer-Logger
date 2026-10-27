@@ -90,21 +90,105 @@ function getDataDir() {
   return getDocumentsDir();
 }
 
-// Earlier locations of the data folder, oldest layout last. Their contents
-// are copied into the current folder once (see ensureDatabase).
-function getLegacyDataDirs() {
+const HISTORY_FILE = "data-dir-history.json";
+const MAX_HISTORY = 10;
+
+function getAppNames() {
+  return [...new Set([FOLDER_NAME, pkg.productName, pkg.name].filter(Boolean))];
+}
+
+// The history lives in Electron's user data folder, which stays put even
+// when the data folder or the install folder changes.
+function getHistoryPath() {
+  try {
+    const { app } = require("electron");
+    return path.join(app.getPath("userData"), HISTORY_FILE);
+  } catch {
+    return null;
+  }
+}
+
+function readDataDirHistory() {
+  const file = getHistoryPath();
+  if (!file) return [];
+  try {
+    const list = JSON.parse(fs.readFileSync(file, "utf8"));
+    return Array.isArray(list) ? list.filter((d) => typeof d === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// Remembers every data folder this app has used, newest first.
+function recordDataDir(dir) {
+  const file = getHistoryPath();
+  if (!file) return;
+  try {
+    const list = [dir, ...readDataDirHistory().filter((d) => d !== dir)];
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(list.slice(0, MAX_HISTORY), null, 2));
+  } catch (err) {
+    console.error(`Could not record data folder: ${err.message}`);
+  }
+}
+
+// Every place the data folder could have been before: folders used earlier
+// (history), beside the current executable, the previous override / portable
+// folder, the Documents fallback and the default installer locations.
+function getPreviousDataDirs() {
   const current = getDataDir();
-  return [getLegacyInstallDataDir(), getDocumentsDir()].filter(
-    (dir, i, all) =>
-      dir && dir !== current && all.indexOf(dir) === i && fs.existsSync(dir),
+  const dirs = [...readDataDirHistory()];
+
+  const installData = getLegacyInstallDataDir();
+  if (installData) dirs.push(installData);
+
+  if (process.env.WB_DATA_DIR) dirs.push(path.resolve(process.env.WB_DATA_DIR));
+  if (process.env.PORTABLE_EXECUTABLE_DIR) {
+    dirs.push(path.join(process.env.PORTABLE_EXECUTABLE_DIR, "data"));
+  }
+
+  dirs.push(getDocumentsDir());
+
+  if (process.platform === "win32") {
+    const localAppData =
+      process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    const roots = [
+      path.join(localAppData, "Programs"),
+      process.env.ProgramFiles,
+      process.env["ProgramFiles(x86)"],
+    ].filter(Boolean);
+    for (const root of roots) {
+      for (const name of getAppNames()) dirs.push(path.join(root, name, "data"));
+    }
+  }
+
+  const resolved = dirs.map((d) => path.resolve(d));
+  return resolved.filter(
+    (d, i) => d !== path.resolve(current) && resolved.indexOf(d) === i && fs.existsSync(d),
   );
+}
+
+// The most recently modified non-empty file, so the freshest data wins.
+function pickNewest(files) {
+  let best = null;
+  let bestTime = -1;
+  for (const f of files) {
+    try {
+      const st = fs.statSync(f);
+      if (st.isFile() && st.size > 0 && st.mtimeMs > bestTime) {
+        best = f;
+        bestTime = st.mtimeMs;
+      }
+    } catch {
+      // missing or unreadable: skip
+    }
+  }
+  return best;
 }
 
 function getOldDatabaseCandidates() {
   const home = os.homedir();
-  const names = [
-    ...new Set([FOLDER_NAME, pkg.productName, pkg.name].filter(Boolean)),
-  ];
+  const names = getAppNames();
   const list = [];
   for (const n of names) {
     if (process.platform === "win32") {
@@ -113,14 +197,7 @@ function getOldDatabaseCandidates() {
       list.push(path.join(appData, n, "config", "config.sqlite"));
     } else if (process.platform === "darwin") {
       list.push(
-        path.join(
-          home,
-          "Library",
-          "Application Support",
-          n,
-          "config",
-          "config.sqlite",
-        ),
+        path.join(home, "Library", "Application Support", n, "config", "config.sqlite"),
       );
     } else {
       list.push(path.join(home, ".config", n, "config", "config.sqlite"));
@@ -140,14 +217,14 @@ function migrateLogs() {
   if (fs.existsSync(newLog)) return;
 
   // ...\config\config.sqlite -> ...\log\seen_avatar_ids.txt
-  const oldFile = [
-    ...getLegacyDataDirs().map((d) =>
-      path.join(d, "log", "seen_avatar_ids.txt"),
-    ),
-    ...getOldDatabaseCandidates().map((p) =>
-      path.join(path.dirname(path.dirname(p)), "log", "seen_avatar_ids.txt"),
-    ),
-  ].find((p) => p !== newLog && fs.existsSync(p));
+  const oldFile = pickNewest(
+    [
+      ...getPreviousDataDirs().map((d) => path.join(d, "log", "seen_avatar_ids.txt")),
+      ...getOldDatabaseCandidates().map((p) =>
+        path.join(path.dirname(path.dirname(p)), "log", "seen_avatar_ids.txt"),
+      ),
+    ].filter((p) => p !== newLog),
+  );
 
   if (oldFile) {
     try {
@@ -165,12 +242,12 @@ function ensureDatabase() {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   if (!fs.existsSync(dbPath)) {
-    const oldDb = [
-      ...getLegacyDataDirs().map((d) =>
-        path.join(d, "config", "config.sqlite"),
-      ),
-      ...getOldDatabaseCandidates(),
-    ].find((p) => p !== dbPath && fs.existsSync(p));
+    const oldDb = pickNewest(
+      [
+        ...getPreviousDataDirs().map((d) => path.join(d, "config", "config.sqlite")),
+        ...getOldDatabaseCandidates(),
+      ].filter((p) => p !== dbPath),
+    );
     if (oldDb) {
       try {
         fs.copyFileSync(oldDb, dbPath); // copy, so the old file stays as a backup
@@ -181,6 +258,7 @@ function ensureDatabase() {
   }
 
   migrateLogs();
+  recordDataDir(getDataDir()); // so a later move can find this folder again
   return dbPath;
 }
 
