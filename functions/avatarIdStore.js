@@ -37,6 +37,9 @@ const FLUSH_INTERVAL_MS = 2000;
 // once after this delay (debounced, so a burst of failures = one rewrite).
 const REWRITE_DELAY_MS = 5000;
 
+// flushAll() gives up after this many drain passes (e.g. persistent disk errors).
+const MAX_FLUSH_ALL_PASSES = 10;
+
 class avatar_id_store {
   static _seenIds = null;
   static _storePath = null;
@@ -44,8 +47,16 @@ class avatar_id_store {
 
   static _pendingWrites = [];
   static _flushTimer = null;
-  static _flushInFlight = null;
+  static _flushInFlight = null; // the running append OR rewrite disk write
   static _rewriteTimer = null;
+
+  // Every _rewrite() call from the moment its timer fires until it settles,
+  // including the stretch where it is still waiting on a running append.
+  static _activeOps = new Set();
+
+  // Set by flushSync(): the process is going down, so no new async disk
+  // writes may start (they could land after the synchronous write).
+  static _shuttingDown = false;
 
   static _getStorePath() {
     if (!avatar_id_store._storePath) {
@@ -53,6 +64,40 @@ class avatar_id_store {
       avatar_id_store._storePath = path.join(logpath, "seen_avatar_ids.txt");
     }
     return avatar_id_store._storePath;
+  }
+
+  /**
+   * Synchronously writes the full in-memory set. Used by flushSync(), and
+   * re-run when an async write that was already dispatched lands after it,
+   * so a stale append/rewrite can't leave duplicates or resurrect a removed ID.
+   */
+  static _writeFullSync() {
+    const storePath = avatar_id_store._getStorePath();
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    const ids = [...avatar_id_store._seenIds];
+    fs.writeFileSync(storePath, ids.length ? ids.join("\n") + "\n" : "");
+  }
+
+  static _repairAfterLateWrite() {
+    if (!avatar_id_store._shuttingDown || !avatar_id_store._seenIds) return;
+    try {
+      avatar_id_store._writeFullSync();
+    } catch (err) {
+      console.error("[avatar_id_store] post-shutdown repair failed:", err.message);
+    }
+  }
+
+  /**
+   * Registers a promise as an outstanding operation until it settles.
+   */
+  static _track(promise) {
+    const tracked = promise
+      .catch(() => {})
+      .finally(() => {
+        avatar_id_store._activeOps.delete(tracked);
+      });
+    avatar_id_store._activeOps.add(tracked);
+    return tracked;
   }
 
   /**
@@ -106,6 +151,7 @@ class avatar_id_store {
   }
 
   static async _flush() {
+    if (avatar_id_store._shuttingDown) return; // flushSync() owns the disk now
     if (avatar_id_store._pendingWrites.length === 0) return;
 
     // Coalesce concurrent flush calls into a single write operation.
@@ -136,6 +182,7 @@ class avatar_id_store {
       })
       .finally(() => {
         avatar_id_store._flushInFlight = null;
+        avatar_id_store._repairAfterLateWrite();
         // IDs that arrived during the write need their own flush.
         if (avatar_id_store._pendingWrites.length > 0) {
           avatar_id_store._scheduleFlush();
@@ -146,25 +193,99 @@ class avatar_id_store {
   }
 
   /**
-   * Synchronous flush, for app shutdown. Call from app "before-quit"
-   * and from the uncaughtException handler.
+   * True while anything has not reached disk yet: a scheduled flush or
+   * rewrite, buffered IDs, a running append/rewrite, or a rewrite that has
+   * fired but not finished.
    */
-  static flushSync() {
-    const hasRewrite = !!avatar_id_store._rewriteTimer;
-    if (!hasRewrite && avatar_id_store._pendingWrites.length === 0) return;
+  static _hasOutstandingWork() {
+    return (
+      !!avatar_id_store._flushTimer ||
+      !!avatar_id_store._rewriteTimer ||
+      !!avatar_id_store._flushInFlight ||
+      avatar_id_store._activeOps.size > 0 ||
+      avatar_id_store._pendingWrites.length > 0
+    );
+  }
 
-    try {
-      const storePath = avatar_id_store._getStorePath();
-      fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  /**
+   * Async shutdown flush. Waits for any in-flight append or rewrite, then
+   * writes whatever is still buffered or scheduled. Call (and await) this
+   * from "before-quit" and the uncaughtException handler, with a timeout
+   * fallback to flushSync().
+   */
+  static async flushAll() {
+    for (let pass = 0; pass < MAX_FLUSH_ALL_PASSES; pass++) {
+      if (avatar_id_store._flushTimer) {
+        clearTimeout(avatar_id_store._flushTimer);
+        avatar_id_store._flushTimer = null;
+      }
 
-      if (hasRewrite && avatar_id_store._seenIds) {
-        // A rewrite was waiting: write the full set (it already contains
-        // everything that was pending).
+      // Wait for a running append/rewrite before deciding what is left.
+      if (avatar_id_store._flushInFlight) {
+        await avatar_id_store._flushInFlight.catch(() => {});
+        continue;
+      }
+      if (avatar_id_store._activeOps.size > 0) {
+        await Promise.allSettled([...avatar_id_store._activeOps]);
+        continue;
+      }
+
+      // A scheduled rewrite should happen now instead of after its delay.
+      if (avatar_id_store._rewriteTimer) {
         clearTimeout(avatar_id_store._rewriteTimer);
         avatar_id_store._rewriteTimer = null;
-        const ids = [...avatar_id_store._seenIds];
-        fs.writeFileSync(storePath, ids.length ? ids.join("\n") + "\n" : "");
-      } else {
+        await avatar_id_store._track(avatar_id_store._rewrite());
+        continue;
+      }
+
+      if (avatar_id_store._pendingWrites.length > 0) {
+        await avatar_id_store._flush();
+        continue;
+      }
+
+      return; // nothing in flight, nothing scheduled, nothing buffered
+    }
+
+    console.error(
+      "[avatar_id_store] flushAll gave up after repeated failures; some IDs may not be saved.",
+    );
+  }
+
+  /**
+   * Synchronous flush, last resort for app shutdown (an async wait is not
+   * always possible there). Prefer `await flushAll()` first.
+   *
+   * It treats in-flight appends/rewrites as outstanding work: when one is
+   * running (or a rewrite is scheduled), it writes the full in-memory set
+   * synchronously, which already contains every pending ID and no removed
+   * ID. It also stops any further async disk writes from starting, so
+   * nothing newer can be overwritten by a stale snapshot afterwards.
+   */
+  static flushSync() {
+    if (!avatar_id_store._hasOutstandingWork()) return;
+
+    avatar_id_store._shuttingDown = true;
+
+    const needsFullRewrite =
+      !!avatar_id_store._rewriteTimer ||
+      !!avatar_id_store._flushInFlight ||
+      avatar_id_store._activeOps.size > 0;
+
+    if (avatar_id_store._flushTimer) {
+      clearTimeout(avatar_id_store._flushTimer);
+      avatar_id_store._flushTimer = null;
+    }
+    if (avatar_id_store._rewriteTimer) {
+      clearTimeout(avatar_id_store._rewriteTimer);
+      avatar_id_store._rewriteTimer = null;
+    }
+
+    try {
+      if (needsFullRewrite && avatar_id_store._seenIds) {
+        avatar_id_store._writeFullSync();
+      } else if (avatar_id_store._pendingWrites.length > 0) {
+        const storePath = avatar_id_store._getStorePath();
+        fs.mkdirSync(path.dirname(storePath), { recursive: true });
         fs.appendFileSync(
           storePath,
           avatar_id_store._pendingWrites.join("\n") + "\n",
@@ -233,7 +354,7 @@ class avatar_id_store {
 
     avatar_id_store._rewriteTimer = setTimeout(() => {
       avatar_id_store._rewriteTimer = null;
-      avatar_id_store._rewrite();
+      avatar_id_store._track(avatar_id_store._rewrite());
     }, REWRITE_DELAY_MS);
 
     if (avatar_id_store._rewriteTimer.unref) {
@@ -249,7 +370,13 @@ class avatar_id_store {
     if (avatar_id_store._flushInFlight) {
       await avatar_id_store._flushInFlight.catch(() => {});
     }
-    if (avatar_id_store._flushInFlight) return; // someone else started one; retry later
+    if (avatar_id_store._shuttingDown) return; // flushSync() owns the disk now
+    if (avatar_id_store._flushInFlight) {
+      // Someone else started a write while we waited; try again later
+      // instead of silently dropping the removal.
+      avatar_id_store._scheduleRewrite();
+      return;
+    }
     if (!avatar_id_store._seenIds) return;
 
     const storePath = avatar_id_store._getStorePath();
@@ -268,6 +395,7 @@ class avatar_id_store {
       })
       .finally(() => {
         avatar_id_store._flushInFlight = null;
+        avatar_id_store._repairAfterLateWrite();
         // IDs that arrived during the write need their own flush.
         if (avatar_id_store._pendingWrites.length > 0) {
           avatar_id_store._scheduleFlush();

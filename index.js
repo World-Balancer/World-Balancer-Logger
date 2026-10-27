@@ -216,12 +216,35 @@ function readNewLogs(fileSize) {
   }
 })();
 
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 3000;
+
+/**
+ * Waits for in-flight avatar ID appends/rewrites (and anything buffered) to
+ * reach disk. If that takes too long or fails, falls back to flushSync(),
+ * which writes the full in-memory set synchronously. Never rejects.
+ */
+async function shutdownAvatarStore() {
+  let timer;
+  try {
+    await Promise.race([
+      avatar_id_store.flushAll(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, SHUTDOWN_FLUSH_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (err) {
+    reportError(`Avatar ID store flush failed: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+    avatar_id_store.flushSync(); // no-op if flushAll finished everything
+  }
+}
+
 process.on("uncaughtException", (err, origin) => {
   reportError(
     `Uncaught Exception at: ${new Date().toISOString()}\nError: ${err.message}\nStack: ${err.stack}\nOrigin: ${origin}`,
   );
-  avatar_id_store.flushSync(); // save buffered avatar IDs before exiting
-  setTimeout(() => process.exit(1), 100);
+  shutdownAvatarStore().finally(() => process.exit(1));
 });
 
 process.on("unhandledRejection", (reason, promise) => {
