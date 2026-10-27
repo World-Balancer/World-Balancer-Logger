@@ -23,61 +23,16 @@ SOFTWARE.
 */
 
 const { Sequelize } = require("sequelize");
-const path = require("path");
-const fs = require("fs");
-const os = require("os");
-const pkg = require("../package.json");
+const { ensureDatabase } = require("../paths");
 
-function getUserDataPath() {
-  try {
-    const { app } = require("electron");
-    if (app && typeof app.getPath === "function") {
-      return path.join(app.getPath("userData"), "config");
-    }
-  } catch {
-    // empty
-  }
+// ensureDatabase() creates the data folder and copies an older database over
+// once, before Sequelize opens the file.
+const storage = ensureDatabase();
 
-  const platform = process.platform;
-  const home = os.homedir();
-
-  if (platform === "win32") {
-    return path.join(home, "AppData", "Roaming", pkg.name, "config");
-  } else if (platform === "darwin") {
-    return path.join(
-      home,
-      "Library",
-      "Application Support",
-      pkg.name,
-      "config",
-    );
-  } else {
-    return path.join(home, ".config", pkg.name, "config");
-  }
-}
-
-const dbDir = getUserDataPath();
-const dbPath = path.join(dbDir, "config.sqlite");
-
-fs.promises.mkdir(dbDir, { recursive: true }).catch((err) => {
-  console.error(
-    `Critical database directory footprint setup failed: ${err.message}`,
-  );
-});
-
-const sequelize = new Sequelize({
+// Exports the Sequelize instance itself: models/Config.js calls
+// sequelize.define(...), and main.js calls authenticate() and sync().
+module.exports = new Sequelize({
   dialect: "sqlite",
-  storage: dbPath,
+  storage,
   logging: false,
-  pool: {
-    max: 1,
-    min: 0,
-    idle: 1000,
-    acquire: 5000,
-  },
-  dialectOptions: {
-    timeout: 5000,
-  },
 });
-
-module.exports = sequelize;

@@ -28,6 +28,8 @@ const https = require("https");
 const main = require("../main");
 const getConfig = require("../models/getConfig");
 const { log_error } = require("../functions/logsclass.js");
+const { avatar_id_store } = require("../functions/avatarIdStore.js");
+const { version } = require("../package.json");
 
 function reportError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
@@ -51,11 +53,24 @@ function logToMain(message, type = "info") {
   main.log(message, type, "main_log");
 }
 
+const API_URL =
+  "https://avatar.worldbalancer.com/v3/vrchat/avatars/store/putavatarExternalMult";
+
 const BATCH_SIZE = 30;
 const FLUSH_DELAY = 1000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000;
+const MAX_RETRY_WAIT = 60000;
 const MAX_QUEUE_SIZE = 5000;
+
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ECONNABORTED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
 
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -73,12 +88,12 @@ const httpsAgent = new https.Agent({
 
 const axiosInstance = axios.create({
   timeout: 25000,
-  maxRedirects: 0,
+  maxRedirects: 0, // never follow redirects: POST bodies contain user data
   httpAgent,
   httpsAgent,
   headers: {
     "Content-Type": "application/json",
-    "User-Agent": "World Balancer/0.0.3 contact@worldbalancer.com",
+    "User-Agent": `World Balancer/${version} contact@worldbalancer.com`,
     Connection: "keep-alive",
   },
 });
@@ -94,113 +109,204 @@ let failed = 0;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function sendBatch(batch, retryCount = 0) {
-  const validItems = batch.filter((j) => {
-    if (!j || typeof j !== "object") {
-      logToMain(
-        `[Batch] Skipping invalid job object: ${JSON.stringify(j)}`,
-        "warn",
-      );
-      return false;
+function failJob(job, reason) {
+  failed++;
+  if (job?.onFail) {
+    try {
+      job.onFail(job.avatarId, reason);
+    } catch (cbErr) {
+      logToMain(cbErr.message, "warn");
     }
-    if (!j.avatarId || typeof j.avatarId !== "string") {
-      logToMain(`[Batch] Skipping invalid avatarId: ${j.avatarId}`, "warn");
-      return false;
-    }
-    if (!j.userid || typeof j.userid !== "string") {
-      logToMain(`[Batch] Skipping invalid userid: ${j.userid}`, "warn");
-      return false;
-    }
-    return true;
-  });
+  }
+}
 
-  if (validItems.length === 0) {
-    logToMain("[Batch] ⚠️ No valid items in batch! Skipping...", "warn");
+// The server refused this specific avatar even when sent alone, so sending it
+// again would give the same answer. Unlike failJob, the ID is NOT unmarked,
+// which stops it being re-sent every time it shows up in the log.
+function rejectJob(job, reason) {
+  failed++;
+  if (job?.onReject) {
+    try {
+      job.onReject(job.avatarId, reason);
+    } catch (cbErr) {
+      logToMain(cbErr.message, "warn");
+    }
+  }
+}
+
+// Statuses where the server may be refusing the batch because of ONE member
+// (bad request / payload / unprocessable) while accepting the others.
+const MEMBER_REJECT_STATUSES = new Set([400, 413, 422]);
+
+// Retry-After is either delta-seconds ("120") or an HTTP date
+// ("Wed, 21 Oct 2026 07:28:00 GMT"). Returns milliseconds to wait, or null
+// when the header is missing or unusable.
+function parseRetryAfterMs(value, now = Date.now()) {
+  if (Array.isArray(value)) value = value[0];
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (text === "") return null;
+
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const seconds = Number(text);
+    return seconds > 0 ? seconds * 1000 : null;
+  }
+
+  const dateMs = Date.parse(text);
+  if (Number.isNaN(dateMs)) return null;
+  const delta = dateMs - now;
+  return delta > 0 ? delta : null; // a date in the past means "retry now-ish"
+}
+
+function retryWaitMs(err, attempt) {
+  if (err.response?.status === 429) {
+    const headers = err.response.headers || {};
+    const requested = parseRetryAfterMs(
+      headers["retry-after"] ?? headers["Retry-After"],
+    );
+    if (requested !== null) return Math.min(requested, MAX_RETRY_WAIT);
+  }
+  return RETRY_DELAY * (attempt + 1);
+}
+
+function isValidBatchItem(j) {
+  if (!j || typeof j !== "object") {
+    logToMain(
+      `[Batch] Skipping invalid job object: ${JSON.stringify(j)}`,
+      "warn",
+    );
+    return false;
+  }
+  if (!j.avatarId || typeof j.avatarId !== "string") {
+    logToMain(`[Batch] Skipping invalid avatarId: ${j.avatarId}`, "warn");
+    return false;
+  }
+  if (!j.userid || typeof j.userid !== "string") {
+    logToMain(`[Batch] Skipping invalid userid: ${j.userid}`, "warn");
+    return false;
+  }
+  return true;
+}
+
+function buildPayload(items) {
+  return { avatars: items.map((j) => ({ id: j.avatarId, userid: j.userid })) };
+}
+
+function isRetryable(err) {
+  const status = err.response?.status;
+  return (
+    NETWORK_ERROR_CODES.has(err.code) ||
+    status === 429 ||
+    (status >= 500 && status <= 599)
+  );
+}
+
+// POSTs the payload, retrying transient errors.
+// Returns { res } on success or { err } once retries are exhausted / not retryable.
+async function postWithRetries(payload, validCount, totalCount) {
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const retryLabel = attempt > 0 ? `(retry ${attempt}/${MAX_RETRIES})` : "";
+    logToMain(
+      `[Batch] Sending ${validCount}/${totalCount} valid avatars ${retryLabel}`,
+    );
+
+    try {
+      return { res: await axiosInstance.post(API_URL, payload) };
+    } catch (err) {
+      lastErr = err;
+      reportError(
+        `[Batch] FAILED → ${validCount} avatars | code=${err.code} | status=${err.response?.status || "N/A"} | ${err.message}`,
+      );
+
+      // 400/401/403/404...: retrying or splitting won't help
+      if (!isRetryable(err) || attempt === MAX_RETRIES) break;
+
+      const waitTime = retryWaitMs(err, attempt);
+      reportError(`[Batch] Retryable error. Retrying in ${waitTime}ms...`);
+      await sleep(waitTime);
+    }
+  }
+
+  return { err: lastErr };
+}
+
+function markBatchSucceeded(items, res) {
+  processed += items.length;
+  logToMain(`[Batch] SUCCESS → ${items.length} avatars | status=${res.status}`);
+  for (const job of items) job.onSuccess?.(job.avatarId);
+}
+
+// Sends each item alone so one bad member can't sink the rest.
+async function sendIndividually(items) {
+  for (const job of items) {
+    try {
+      await axiosInstance.post(API_URL, buildPayload([job]));
+
+      processed++;
+      logToMain(`[Fallback] SUCCESS → ${job.avatarId}`);
+      job.onSuccess?.(job.avatarId);
+    } catch (e) {
+      const errorMsg = e?.message || e?.code || "Unknown error";
+      reportError(`[Fallback] FAILED → ${job?.avatarId} | ${errorMsg}`, true);
+      if (MEMBER_REJECT_STATUSES.has(e?.response?.status)) {
+        rejectJob(job, errorMsg); // this avatar itself is refused
+      } else {
+        failJob(job, errorMsg); // transient: let it be sent again later
+      }
+    }
+    await sleep(100);
+  }
+}
+
+// Retries are over. A 5xx, or a 400/413/422 that may come from one bad
+// member, can hide items the server would accept alone, so try them one by
+// one. Other errors (401/403/404/429...) affect every item equally.
+async function handleBatchFailure(items, err) {
+  const status = err?.response?.status;
+  const serverError = status >= 500 && status <= 599;
+  const memberReject = MEMBER_REJECT_STATUSES.has(status);
+  const reason = err?.message || "Unknown error";
+
+  if (!serverError && !memberReject) {
+    for (const job of items) failJob(job, reason);
     return;
   }
 
-  const payload = {
-    avatars: validItems.map((j) => ({
-      id: j.avatarId,
-      userid: j.userid,
-    })),
-  };
+  // A single item that was rejected has nobody to be separated from.
+  if (items.length === 1) {
+    if (memberReject) rejectJob(items[0], reason);
+    else failJob(items[0], reason);
+    return;
+  }
 
   logToMain(
-    `[Batch] Sending ${validItems.length}/${batch.length} valid avatars ${retryCount > 0 ? `(retry ${retryCount}/${MAX_RETRIES})` : ""}`,
+    `[Batch] ${serverError ? "Server error" : `Rejected (${status})`}. Falling back to individual sends...`,
+    "warn",
+  );
+  await sendIndividually(items);
+}
+
+async function sendBatch(batch) {
+  const validItems = batch.filter(isValidBatchItem);
+
+  if (validItems.length === 0) {
+    logToMain("[Batch] No valid items in batch! Skipping...", "warn");
+    return;
+  }
+
+  const { res, err } = await postWithRetries(
+    buildPayload(validItems),
+    validItems.length,
+    batch.length,
   );
 
-  try {
-    const res = await axiosInstance.post(
-      "https://avatar.worldbalancer.com/v3/vrchat/avatars/store/putavatarExternalMult",
-      payload,
-    );
-
-    processed += batch.length;
-    logToMain(
-      `[Batch] SUCCESS → ${batch.length} avatars | status=${res.status}`,
-    );
-
-    for (const job of batch) {
-      job.onSuccess?.(job.avatarId);
-    }
-  } catch (err) {
-    const isConnectionError =
-      err.code === "ECONNRESET" ||
-      err.code === "ECONNREFUSED" ||
-      err.code === "ETIMEDOUT";
-
-    reportError(
-      `[Batch] FAILED → ${batch.length} avatars | code=${err.code} | status=${err.response?.status || "N/A"}`,
-    );
-
-    if (isConnectionError && retryCount < MAX_RETRIES) {
-      const waitTime = RETRY_DELAY * (retryCount + 1);
-      reportError(
-        `[Batch] Connection error detected. Retrying in ${waitTime}ms...`,
-      );
-      await sleep(waitTime);
-      return sendBatch(batch, retryCount + 1);
-    }
-
-    logToMain("[Batch] Falling back to individual sends...", "warn");
-
-    for (const job of batch) {
-      try {
-        if (!job || typeof job !== "object" || !job.avatarId || !job.userid) {
-          failed++;
-          continue;
-        }
-
-        const fallbackPayload = {
-          id: job.avatarId,
-          userid: job.userid,
-        };
-
-        await axiosInstance.post(
-          "https://avatar.worldbalancer.com/v3/vrchat/avatars/store/putavatarExternalMult",
-          fallbackPayload,
-        );
-
-        processed++;
-        logToMain(`[Fallback] SUCCESS → ${job.avatarId}`);
-        job.onSuccess?.(job.avatarId);
-      } catch (e) {
-        failed++;
-        const errorMsg = e?.message || e?.code || "Unknown error";
-        reportError(`[Fallback] FAILED → ${job?.avatarId} | ${errorMsg}`, true);
-
-        if (job?.onFail) {
-          try {
-            job.onFail(job.avatarId, errorMsg);
-          } catch (cbErr) {
-            logToMain(cbErr.message, "warn");
-          }
-        }
-      }
-      await sleep(100);
-    }
+  if (res) {
+    markBatchSucceeded(validItems, res);
+    return;
   }
+  await handleBatchFailure(validItems, err);
 }
 
 async function worker() {
@@ -211,31 +317,45 @@ async function worker() {
 
   logToMain(`[BatchQueue] STARTED | size=${queue.length}`);
 
-  while (queue.length > 0) {
-    const batch = queue.splice(0, BATCH_SIZE);
+  let batch = [];
 
-    for (const job of batch) {
-      queuedSet.delete(job.avatarId);
-    }
+  try {
+    while (queue.length > 0) {
+      batch = queue.splice(0, BATCH_SIZE);
 
-    const safeBatch = batch.filter(
-      (j) => j?.avatarId && isValidAvtrId(j.avatarId),
-    );
+      for (const job of batch) {
+        queuedSet.delete(job.avatarId);
+      }
 
-    if (safeBatch.length === 0) {
-      logToMain(
-        `[BatchQueue] Skipped batch: 0 valid items out of ${batch.length}`,
-        "warn",
+      const safeBatch = batch.filter(
+        (j) => j?.avatarId && isValidAvtrId(j.avatarId),
       );
-      continue;
+
+      if (safeBatch.length === 0) {
+        logToMain(
+          `[BatchQueue] Skipped batch: 0 valid items out of ${batch.length}`,
+          "warn",
+        );
+        continue;
+      }
+
+      await sendBatch(safeBatch);
+      batch = [];
+      await sleep(FLUSH_DELAY);
     }
-
-    await sendBatch(safeBatch);
-    await sleep(FLUSH_DELAY);
+  } catch (err) {
+    reportError(`[BatchQueue] Worker crashed: ${err.message}`);
+    // Jobs from the batch that was in progress must be released for retry.
+    for (const job of batch) failJob(job, `worker crashed: ${err.message}`);
+  } finally {
+    running = false;
+    logToMain("[BatchQueue] STOPPED (empty)");
+    // Jobs added while the crash was unwinding still need a worker.
+    if (queue.length > 0 && !workerStarting) {
+      workerStarting = true;
+      worker();
+    }
   }
-
-  running = false;
-  logToMain("[BatchQueue] STOPPED (empty)");
 }
 
 function enqueueAvatar(job) {
@@ -255,6 +375,7 @@ function enqueueAvatar(job) {
       `[BatchQueue] Queue full (${queue.length}/${MAX_QUEUE_SIZE}), dropping avatarId=${job.avatarId}`,
       true,
     );
+    failJob(job, "queue full"); // lets the caller unmark it so it can be retried
     return;
   }
 
@@ -267,14 +388,45 @@ function enqueueAvatar(job) {
   }
 }
 
+// Config values may be stored as JSON text (e.g. "\"1234\""); keep it a string.
+let warnedUnsafeDiscordId = false;
+
+function normalizeDiscordId(raw) {
+  if (typeof raw === "bigint") raw = raw.toString();
+
+  // A config value stored as a JSON number. Convert it to a string ID, but
+  // only when the number is exact: Discord IDs have ~18 digits, more than a
+  // JavaScript number holds, so a larger value was already rounded when it was
+  // parsed and its digits are wrong. A wrong ID would attribute updates to
+  // another user, so those are rejected (and reported once) instead.
+  if (typeof raw === "number") {
+    if (Number.isSafeInteger(raw) && raw > 0) return String(raw);
+    if (!warnedUnsafeDiscordId) {
+      warnedUnsafeDiscordId = true;
+      reportError(
+        'Userid.discord_id is stored as a number that cannot hold the full ID without rounding. Store it as a string (e.g. "123456789012345678").',
+      );
+    }
+    return null;
+  }
+
+  if (typeof raw !== "string") return null;
+  let value = raw.trim();
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "string") value = parsed.trim();
+  } catch {
+    // plain string, keep as is
+  }
+  return value !== "" ? value : null;
+}
+
 async function enqueueLogAvatar(avatarId) {
   let discordId = "system_log";
 
   try {
-    const fetchedId = await getConfig("Userid.discord_id");
-    if (fetchedId && typeof fetchedId === "string" && fetchedId.trim() !== "") {
-      discordId = fetchedId.trim();
-    }
+    const fetchedId = normalizeDiscordId(await getConfig("Userid.discord_id"));
+    if (fetchedId) discordId = fetchedId;
   } catch (err) {
     reportError(
       `Failed to look up config Userid.discord_id: ${err.message}`,
@@ -285,24 +437,66 @@ async function enqueueLogAvatar(avatarId) {
   enqueueAvatar({
     avatarId,
     userid: discordId,
-    onSuccess: (id) => logToMain(`[LogSync] Synced extracted ID: ${id}`),
-    onFail: (id, err) =>
-      logToMain(`[LogSync] Sync error on ${id}: ${err}`, "warn"),
+    onSuccess: (id) => {
+      logToMain(`[LogSync] Synced extracted ID: ${id}`);
+      // Only now is the ID saved to disk; until then a quit/crash just means
+      // it gets sent again after restart.
+      avatar_id_store.confirm(id);
+    },
+    onReject: (id, err) => {
+      // Refused by the server on its own: keep it marked for this session so
+      // it is not re-sent on every sighting. It is never saved to disk
+      // (unconfirmed), so it gets one fresh attempt after a restart.
+      logToMain(`[LogSync] Server rejected ${id}: ${err}`, "warn");
+    },
+    onFail: (id, err) => {
+      logToMain(`[LogSync] Sync error on ${id}: ${err}`, "warn");
+      // Forget the ID so the next time it appears in the log it is sent again.
+      avatar_id_store
+        .unmark(id)
+        .catch((e) =>
+          reportError(`[LogSync] unmark failed for ${id}: ${e.message}`),
+        );
+    },
   });
 }
 
-setInterval(() => {
-  logToMain(
-    `[Stats] queue=${queue.length} | processed=${processed} | failed=${failed} | running=${running ? "yes" : "no"}`,
-  );
-}, 60 * 60 * 1000);
+const statsTimer = setInterval(
+  () => {
+    logToMain(
+      `[Stats] queue=${queue.length} | processed=${processed} | failed=${failed} | running=${running ? "yes" : "no"}`,
+    );
+  },
+  60 * 60 * 1000,
+);
+if (statsTimer.unref) statsTimer.unref();
+
+/**
+ * Resolves once the queue is empty and the worker is idle, or after
+ * timeoutMs, whichever comes first. For "before-quit": a best-effort drain.
+ * Nothing depends on it finishing, since unconfirmed IDs are not persisted.
+ */
+async function waitForIdle(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (
+    (running || workerStarting || queue.length > 0) &&
+    Date.now() < deadline
+  ) {
+    await sleep(100);
+  }
+  return !(running || workerStarting || queue.length > 0);
+}
 
 function getQueueStats() {
   return { queue: queue.length, processed, failed, running };
 }
 
 module.exports = {
+  normalizeDiscordId,
+  parseRetryAfterMs,
+  retryWaitMs,
   enqueueAvatar,
   enqueueLogAvatar,
   getQueueStats,
+  waitForIdle,
 };

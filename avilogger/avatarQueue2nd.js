@@ -28,6 +28,7 @@ const https = require("https");
 const main = require("../main");
 const getConfig = require("../models/getConfig.js");
 const { log_error } = require("../functions/logsclass.js");
+const { version } = require("../package.json");
 
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -45,12 +46,12 @@ const httpsAgent = new https.Agent({
 
 const axiosInstance = axios.create({
   timeout: 25000,
-  maxRedirects: 0,
+  maxRedirects: 0, // never follow redirects: POST bodies contain user data
   httpAgent,
   httpsAgent,
   headers: {
     "Content-Type": "application/json",
-    "User-Agent": "World Balancer/0.0.3 contact@worldbalancer.com",
+    "User-Agent": `World Balancer/${version} contact@worldbalancer.com`,
     Connection: "keep-alive",
   },
 });
@@ -62,6 +63,40 @@ function reportError(message, emitToMain = false) {
   }
 }
 
+// Config values may be stored as JSON text (e.g. "\"1234\""); keep it a string
+// so large Discord IDs never get converted to a number and lose precision.
+let warnedUnsafeDiscordId = false;
+
+function normalizeDiscordId(raw) {
+  if (typeof raw === "bigint") raw = raw.toString();
+
+  // A config value stored as a JSON number. Convert it to a string ID, but
+  // only when the number is exact: Discord IDs have ~18 digits, more than a
+  // JavaScript number holds, so a larger value was already rounded when it was
+  // parsed and its digits are wrong. A wrong ID would attribute updates to
+  // another user, so those are rejected (and reported once) instead.
+  if (typeof raw === "number") {
+    if (Number.isSafeInteger(raw) && raw > 0) return String(raw);
+    if (!warnedUnsafeDiscordId) {
+      warnedUnsafeDiscordId = true;
+      reportError(
+        'Userid.discord_id is stored as a number that cannot hold the full ID without rounding. Store it as a string (e.g. "123456789012345678").',
+      );
+    }
+    return null;
+  }
+
+  if (typeof raw !== "string") return null;
+  let value = raw.trim();
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "string") value = parsed.trim();
+  } catch {
+    // plain string, keep as is
+  }
+  return value !== "" ? value : null;
+}
+
 /**
  * Handles fetching discordId and sending the switch status to your API endpoint
  * @param {string} username
@@ -69,25 +104,12 @@ function reportError(message, emitToMain = false) {
  */
 async function enqueueSwitchStatus(username, avatarName) {
   try {
-    const raw = await getConfig("Userid.discord_id");
-
-    let discordId;
-    try {
-      discordId = JSON.parse(raw);
-    } catch {
-      discordId = raw;
-    }
-
-    const isValidDiscordId =
-      discordId !== null &&
-      discordId !== undefined &&
-      discordId !== "" &&
-      (typeof discordId === "string" || typeof discordId === "number");
+    const discordId = normalizeDiscordId(await getConfig("Userid.discord_id"));
 
     const payload = {
       username,
       avatarName,
-      ...(isValidDiscordId && { discordId }),
+      ...(discordId && { discordId }),
     };
 
     await axiosInstance.post(
@@ -101,15 +123,15 @@ async function enqueueSwitchStatus(username, avatarName) {
       "main_log",
     );
   } catch (apiErr) {
-    let errorMsg = "";
+    let errorMsg = `enqueueSwitchStatus failed for ${username}: ${apiErr.message}`;
     if (apiErr.response) {
       errorMsg += ` | Status: ${apiErr.response.status} - ${JSON.stringify(apiErr.response.data)}`;
     }
-    console.error(errorMsg);
     reportError(errorMsg, true);
   }
 }
 
 module.exports = {
+  normalizeDiscordId,
   enqueueSwitchStatus,
 };

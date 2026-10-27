@@ -24,13 +24,19 @@ SOFTWARE.
 
 const fs = require("fs");
 const path = require("path");
+const { getDataDir } = require("../paths");
 
 class log_error {
   static writeErrorToFile(error) {
-    const { logpath } = require("../Configfiles/config.js");
-    const errorlog = path.join(logpath, "error.log");
-    const timestamp = new Date().toISOString();
-    fs.appendFileSync(errorlog, `${timestamp} - ${error}\n`);
+    try {
+      const logDir = path.join(getDataDir(), "log");
+      fs.mkdirSync(logDir, { recursive: true });
+      const errorlog = path.join(logDir, "error.log");
+      const timestamp = new Date().toISOString();
+      fs.appendFileSync(errorlog, `${timestamp} - ${error}\n`);
+    } catch (err) {
+      console.error("Failed to write error log:", err.message, "| original:", error);
+    }
   }
 }
 

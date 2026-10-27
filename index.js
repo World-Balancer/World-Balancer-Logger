@@ -26,11 +26,12 @@ const fs = require("fs");
 const path = require("path");
 const main = require("./main");
 const { app } = require("electron");
+const { getDataDir } = require("./paths");
 
 const { enqueueLogAvatar } = require("./avilogger/avatarQueue.js");
 const { enqueueSwitchStatus } = require("./avilogger/avatarQueue2nd.js");
 
-const appInstallPath = app.getPath("userData");
+const appInstallPath = getDataDir();
 const logpath = path.join(appInstallPath, "log");
 const configDir = path.join(appInstallPath, "config");
 
@@ -215,11 +216,35 @@ function readNewLogs(fileSize) {
   }
 })();
 
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 3000;
+
+/**
+ * Waits for in-flight avatar ID appends/rewrites (and anything buffered) to
+ * reach disk. If that takes too long or fails, falls back to flushSync(),
+ * which writes the full in-memory set synchronously. Never rejects.
+ */
+async function shutdownAvatarStore() {
+  let timer;
+  try {
+    await Promise.race([
+      avatar_id_store.flushAll(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, SHUTDOWN_FLUSH_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (err) {
+    reportError(`Avatar ID store flush failed: ${err.message}`);
+  } finally {
+    clearTimeout(timer);
+    avatar_id_store.flushSync(); // no-op if flushAll finished everything
+  }
+}
+
 process.on("uncaughtException", (err, origin) => {
   reportError(
     `Uncaught Exception at: ${new Date().toISOString()}\nError: ${err.message}\nStack: ${err.stack}\nOrigin: ${origin}`,
   );
-  setTimeout(() => process.exit(1), 100);
+  shutdownAvatarStore().finally(() => process.exit(1));
 });
 
 process.on("unhandledRejection", (reason, promise) => {
