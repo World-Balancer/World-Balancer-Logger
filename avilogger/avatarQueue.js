@@ -138,14 +138,33 @@ function rejectJob(job, reason) {
 // (bad request / payload / unprocessable) while accepting the others.
 const MEMBER_REJECT_STATUSES = new Set([400, 413, 422]);
 
+// Retry-After is either delta-seconds ("120") or an HTTP date
+// ("Wed, 21 Oct 2026 07:28:00 GMT"). Returns milliseconds to wait, or null
+// when the header is missing or unusable.
+function parseRetryAfterMs(value, now = Date.now()) {
+  if (Array.isArray(value)) value = value[0];
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (text === "") return null;
+
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const seconds = Number(text);
+    return seconds > 0 ? seconds * 1000 : null;
+  }
+
+  const dateMs = Date.parse(text);
+  if (Number.isNaN(dateMs)) return null;
+  const delta = dateMs - now;
+  return delta > 0 ? delta : null; // a date in the past means "retry now-ish"
+}
+
 function retryWaitMs(err, attempt) {
-  const retryAfter = Number(err.response?.headers?.["retry-after"]);
-  if (
-    err.response?.status === 429 &&
-    Number.isFinite(retryAfter) &&
-    retryAfter > 0
-  ) {
-    return Math.min(retryAfter * 1000, MAX_RETRY_WAIT);
+  if (err.response?.status === 429) {
+    const headers = err.response.headers || {};
+    const requested = parseRetryAfterMs(
+      headers["retry-after"] ?? headers["Retry-After"],
+    );
+    if (requested !== null) return Math.min(requested, MAX_RETRY_WAIT);
   }
   return RETRY_DELAY * (attempt + 1);
 }
@@ -430,6 +449,8 @@ function getQueueStats() {
 }
 
 module.exports = {
+  parseRetryAfterMs,
+  retryWaitMs,
   enqueueAvatar,
   enqueueLogAvatar,
   getQueueStats,
