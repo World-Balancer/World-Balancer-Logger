@@ -46,7 +46,7 @@ const httpsAgent = new https.Agent({
 
 const axiosInstance = axios.create({
   timeout: 25000,
-  maxRedirects: 3,
+  maxRedirects: 0, // never follow redirects: POST bodies contain user data
   httpAgent,
   httpsAgent,
   headers: {
