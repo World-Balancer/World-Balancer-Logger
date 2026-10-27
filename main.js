@@ -28,7 +28,18 @@ const fs = require("fs").promises;
 const fsSync = require("fs");
 const os = require("os");
 const { getDatabasePath, getDataDir } = require("./paths");
-const sequelize = require("./models/configsqlite");
+
+// ensureDatabase() runs when configsqlite is first loaded and throws if an
+// existing database cannot be migrated. Show the reason and quit instead of
+// starting on an empty database.
+let sequelize;
+try {
+  sequelize = require("./models/configsqlite");
+} catch (err) {
+  dialog.showErrorBox("World Balancer could not start", err.message);
+  app.exit(1);
+  return; // stops the rest of main.js from loading
+}
 const Config = require("./models/Config");
 const { version } = require("./package.json");
 const { avatar_id_store } = require("./functions/avatarIdStore.js");
