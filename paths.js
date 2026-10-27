@@ -72,22 +72,73 @@ function isWritable(dir) {
   }
 }
 
+// Problems found while choosing/preparing the data folder (unavailable
+// drive, no permission...). Startup must not crash on these, so they are
+// collected here for the caller to show once the UI/logging is ready.
+const dataDirWarnings = [];
+let resolvedDataDir = null;
+
+function warnDataDir(message) {
+  dataDirWarnings.push(message);
+  console.error(`[paths] ${message}`);
+}
+
+function getDataDirWarnings() {
+  return [...dataDirWarnings];
+}
+
 function getDataDir() {
+  if (resolvedDataDir) return resolvedDataDir;
+
+  // Candidates in priority order. The first one we can actually create and
+  // write to wins; unusable ones are reported and skipped, never thrown.
+  const candidates = [];
+
   // 1) Explicit override
-  if (process.env.WB_DATA_DIR) return path.resolve(process.env.WB_DATA_DIR);
+  if (process.env.WB_DATA_DIR) {
+    candidates.push({
+      dir: path.resolve(process.env.WB_DATA_DIR),
+      label: "WB_DATA_DIR",
+    });
+  }
 
   // 2) Portable build
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
-    return path.join(process.env.PORTABLE_EXECUTABLE_DIR, "data");
+    candidates.push({
+      dir: path.join(process.env.PORTABLE_EXECUTABLE_DIR, "data"),
+      label: "portable data folder",
+    });
   }
 
   // 3) Installed app: a persistent per-user folder OUTSIDE the install
   //    directory, so uninstalling or upgrading never deletes the data.
   const userData = getUserDataDir();
-  if (userData && isWritable(userData)) return userData;
+  if (userData) candidates.push({ dir: userData, label: "user data folder" });
 
-  // 4) Dev mode, or the user data folder is not writable
-  return getDocumentsDir();
+  // 4) Dev mode, or the folders above are not usable
+  candidates.push({ dir: getDocumentsDir(), label: "Documents folder" });
+
+  // 5) Last resort so the app can still start (data here is not persistent)
+  candidates.push({
+    dir: path.join(os.tmpdir(), FOLDER_NAME),
+    label: "temporary folder",
+  });
+
+  for (let i = 0; i < candidates.length; i++) {
+    const { dir, label } = candidates[i];
+    if (isWritable(dir)) {
+      if (i > 0 && dataDirWarnings.length > 0) {
+        warnDataDir(`Using ${label} instead: ${dir}`);
+      }
+      resolvedDataDir = dir;
+      return dir;
+    }
+    warnDataDir(`Cannot use ${label} "${dir}": it is missing or not writable.`);
+  }
+
+  // Nothing is writable at all: return the best guess without throwing.
+  resolvedDataDir = candidates[candidates.length - 1].dir;
+  return resolvedDataDir;
 }
 
 const HISTORY_FILE = "data-dir-history.json";
@@ -158,13 +209,17 @@ function getPreviousDataDirs() {
       process.env["ProgramFiles(x86)"],
     ].filter(Boolean);
     for (const root of roots) {
-      for (const name of getAppNames()) dirs.push(path.join(root, name, "data"));
+      for (const name of getAppNames())
+        dirs.push(path.join(root, name, "data"));
     }
   }
 
   const resolved = dirs.map((d) => path.resolve(d));
   return resolved.filter(
-    (d, i) => d !== path.resolve(current) && resolved.indexOf(d) === i && fs.existsSync(d),
+    (d, i) =>
+      d !== path.resolve(current) &&
+      resolved.indexOf(d) === i &&
+      fs.existsSync(d),
   );
 }
 
@@ -197,7 +252,14 @@ function getOldDatabaseCandidates() {
       list.push(path.join(appData, n, "config", "config.sqlite"));
     } else if (process.platform === "darwin") {
       list.push(
-        path.join(home, "Library", "Application Support", n, "config", "config.sqlite"),
+        path.join(
+          home,
+          "Library",
+          "Application Support",
+          n,
+          "config",
+          "config.sqlite",
+        ),
       );
     } else {
       list.push(path.join(home, ".config", n, "config", "config.sqlite"));
@@ -219,7 +281,9 @@ function migrateLogs() {
   // ...\config\config.sqlite -> ...\log\seen_avatar_ids.txt
   const oldFile = pickNewest(
     [
-      ...getPreviousDataDirs().map((d) => path.join(d, "log", "seen_avatar_ids.txt")),
+      ...getPreviousDataDirs().map((d) =>
+        path.join(d, "log", "seen_avatar_ids.txt"),
+      ),
       ...getOldDatabaseCandidates().map((p) =>
         path.join(path.dirname(path.dirname(p)), "log", "seen_avatar_ids.txt"),
       ),
@@ -239,12 +303,23 @@ function migrateLogs() {
 // Creates the folder and copies old data once, before Sequelize opens the DB.
 function ensureDatabase() {
   const dbPath = getDatabasePath();
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  try {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  } catch (err) {
+    // Never let this escape: it runs while modules are being required, so
+    // a throw here would abort startup before the window opens.
+    warnDataDir(
+      `Cannot create the database folder "${path.dirname(dbPath)}": ${err.message}`,
+    );
+    return dbPath;
+  }
 
   if (!fs.existsSync(dbPath)) {
     const oldDb = pickNewest(
       [
-        ...getPreviousDataDirs().map((d) => path.join(d, "config", "config.sqlite")),
+        ...getPreviousDataDirs().map((d) =>
+          path.join(d, "config", "config.sqlite"),
+        ),
         ...getOldDatabaseCandidates(),
       ].filter((p) => p !== dbPath),
     );
@@ -262,4 +337,9 @@ function ensureDatabase() {
   return dbPath;
 }
 
-module.exports = { getDataDir, getDatabasePath, ensureDatabase };
+module.exports = {
+  getDataDir,
+  getDatabasePath,
+  ensureDatabase,
+  getDataDirWarnings,
+};
