@@ -120,6 +120,24 @@ function failJob(job, reason) {
   }
 }
 
+// The server refused this specific avatar even when sent alone, so sending it
+// again would give the same answer. Unlike failJob, the ID is NOT unmarked,
+// which stops it being re-sent every time it shows up in the log.
+function rejectJob(job, reason) {
+  failed++;
+  if (job?.onReject) {
+    try {
+      job.onReject(job.avatarId, reason);
+    } catch (cbErr) {
+      logToMain(cbErr.message, "warn");
+    }
+  }
+}
+
+// Statuses where the server may be refusing the batch because of ONE member
+// (bad request / payload / unprocessable) while accepting the others.
+const MEMBER_REJECT_STATUSES = new Set([400, 413, 422]);
+
 function retryWaitMs(err, attempt) {
   const retryAfter = Number(err.response?.headers?.["retry-after"]);
   if (
@@ -200,19 +218,30 @@ async function sendBatch(batch) {
     }
   }
 
-  // Retries are over. Only a 5xx suggests one bad item may be breaking the
-  // batch, so only then try the items one by one.
+  // Retries are over. A 5xx, or a 400/413/422 that may come from one bad
+  // member, can hide items the server would accept alone, so try the items
+  // one by one. Other errors (401/403/404/429...) affect every item equally.
   const status = lastErr?.response?.status;
   const serverError = status >= 500 && status <= 599;
+  const memberReject = MEMBER_REJECT_STATUSES.has(status);
 
-  if (!serverError) {
+  if (!serverError && !memberReject) {
     const reason = lastErr?.message || "Unknown error";
     for (const job of validItems) failJob(job, reason);
     return;
   }
 
+  // A single item that was rejected has nobody to be separated from.
+  if (validItems.length === 1) {
+    const job = validItems[0];
+    const reason = lastErr?.message || "Unknown error";
+    if (memberReject) rejectJob(job, reason);
+    else failJob(job, reason);
+    return;
+  }
+
   logToMain(
-    "[Batch] Server error. Falling back to individual sends...",
+    `[Batch] ${serverError ? "Server error" : `Rejected (${status})`}. Falling back to individual sends...`,
     "warn",
   );
 
@@ -228,7 +257,11 @@ async function sendBatch(batch) {
     } catch (e) {
       const errorMsg = e?.message || e?.code || "Unknown error";
       reportError(`[Fallback] FAILED → ${job?.avatarId} | ${errorMsg}`, true);
-      failJob(job, errorMsg);
+      if (MEMBER_REJECT_STATUSES.has(e?.response?.status)) {
+        rejectJob(job, errorMsg); // this avatar itself is refused
+      } else {
+        failJob(job, errorMsg); // transient: let it be sent again later
+      }
     }
     await sleep(100);
   }
@@ -347,6 +380,12 @@ async function enqueueLogAvatar(avatarId) {
       // Only now is the ID saved to disk; until then a quit/crash just means
       // it gets sent again after restart.
       avatar_id_store.confirm(id);
+    },
+    onReject: (id, err) => {
+      // Refused by the server on its own: keep it marked for this session so
+      // it is not re-sent on every sighting. It is never saved to disk
+      // (unconfirmed), so it gets one fresh attempt after a restart.
+      logToMain(`[LogSync] Server rejected ${id}: ${err}`, "warn");
     },
     onFail: (id, err) => {
       logToMain(`[LogSync] Sync error on ${id}: ${err}`, "warn");
