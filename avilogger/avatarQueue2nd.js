@@ -65,7 +65,27 @@ function reportError(message, emitToMain = false) {
 
 // Config values may be stored as JSON text (e.g. "\"1234\""); keep it a string
 // so large Discord IDs never get converted to a number and lose precision.
+let warnedUnsafeDiscordId = false;
+
 function normalizeDiscordId(raw) {
+  if (typeof raw === "bigint") raw = raw.toString();
+
+  // A config value stored as a JSON number. Convert it to a string ID, but
+  // only when the number is exact: Discord IDs have ~18 digits, more than a
+  // JavaScript number holds, so a larger value was already rounded when it was
+  // parsed and its digits are wrong. A wrong ID would attribute updates to
+  // another user, so those are rejected (and reported once) instead.
+  if (typeof raw === "number") {
+    if (Number.isSafeInteger(raw) && raw > 0) return String(raw);
+    if (!warnedUnsafeDiscordId) {
+      warnedUnsafeDiscordId = true;
+      reportError(
+        'Userid.discord_id is stored as a number that cannot hold the full ID without rounding. Store it as a string (e.g. "123456789012345678").',
+      );
+    }
+    return null;
+  }
+
   if (typeof raw !== "string") return null;
   let value = raw.trim();
   try {
@@ -112,5 +132,6 @@ async function enqueueSwitchStatus(username, avatarName) {
 }
 
 module.exports = {
+  normalizeDiscordId,
   enqueueSwitchStatus,
 };
