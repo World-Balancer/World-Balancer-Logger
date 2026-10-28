@@ -43,6 +43,42 @@ const SWITCH_REGEX = /Switching\s+(.*?)\s+to.*avatar\s+(.*)/;
 const AVATAR_API_REGEX = /avatars\/(avtr_[a-f0-9-]+)/;
 const ASSET_BUNDLE_REGEX = /\[AssetBundleDownloadManager\].*?(avtr_[a-f0-9-]+)/;
 
+const DESTINATION_REGEX =
+  /\[Behaviour\] Destination set:\s+(wrld_[a-f0-9-]+)(?::(\S+))?/;
+
+function parseDestination(match) {
+  const worldId = match[1];
+  const rest = match[2] || ""; // e.g. 10635~private(usr_...)~region(use)
+  const [instanceId, ...tagParts] = rest.split("~");
+
+  const tags = {};
+  for (const part of tagParts) {
+    const m = part.match(/^(\w+)(?:\((.*)\))?$/); // name(value) or bare name
+    if (m) tags[m[1]] = m[2] ?? true;
+  }
+
+  return { worldId, instanceId, tags };
+}
+
+function getInstanceType(tags) {
+  if (tags.group) {
+    switch (tags.groupAccessType) {
+      case "public":
+        return "Group Public";
+      case "plus":
+        return "Group+";
+      case "members":
+        return "Group";
+      default:
+        return `Group (${tags.groupAccessType || "unknown"})`;
+    }
+  }
+  if (tags.private) return tags.canRequestInvite ? "Invite+" : "Invite";
+  if (tags.friends) return "Friends";
+  if (tags.hidden) return "Friends+";
+  return "Public";
+}
+
 // Safety cap: if a single new chunk somehow exceeds this, we bail rather
 // than buffering an unbounded string in memory (e.g. corrupted/huge file).
 // Note: a chunk this size can cost several GB of actual process memory once
@@ -164,6 +200,20 @@ function readNewLogs(fileSize) {
           for (let i = 0; i < newLogs.length; i++) {
             const log = newLogs[i];
             if (!log) continue;
+
+            const destMatch = log.match(DESTINATION_REGEX);
+            if (destMatch) {
+              const { worldId, instanceId, tags } = parseDestination(destMatch);
+              const instanceType = getInstanceType(tags);
+
+              //console.log(`Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`)
+
+              main.log(
+                `Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`,
+                "info",
+                "main_log",
+              );
+            }
 
             const switchMatch = log.match(SWITCH_REGEX);
             if (switchMatch) {
