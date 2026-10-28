@@ -79,18 +79,20 @@ function getInstanceType(tags) {
   return "Public";
 }
 
-// Safety cap: if a single new chunk somehow exceeds this, we bail rather
-// than buffering an unbounded string in memory (e.g. corrupted/huge file).
-// Note: a chunk this size can cost several GB of actual process memory once
-// read into a JS string and split into lines (UTF-16 + array overhead).
-const MAX_CHUNK_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+// Max bytes read per pass. Keeps every string far below V8's ~512 MB limit,
+// no matter how large output_log grows.
+const READ_CHUNK_BYTES = 16 * 1024 * 1024; // 16 MB
+
+// If true, the first log file picked up after the app starts is read from its
+// current end (history is skipped). Log files created later are read from byte 0.
+const SKIP_BACKLOG_ON_STARTUP = true;
 
 if (!fs.existsSync(logpath)) fs.mkdirSync(logpath, { recursive: true });
 if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 
 let currentLogFile = null;
 let lastReadPosition = 0;
-let pendingPartialLine = "";
+let isFirstFileSelection = true;
 
 function reportError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
@@ -122,8 +124,16 @@ async function checkForNewFiles() {
 
       if (latestLogFile !== currentLogFile) {
         currentLogFile = latestLogFile;
-        lastReadPosition = 0;
-        pendingPartialLine = "";
+
+        if (isFirstFileSelection && SKIP_BACKLOG_ON_STARTUP) {
+          // Skip history that existed before the app started
+          const { size } = await fs.promises.stat(currentLogFile);
+          lastReadPosition = size;
+        } else {
+          lastReadPosition = 0;
+        }
+        isFirstFileSelection = false;
+
         main.log(
           `Switching to new log file: ${currentLogFile}`,
           "info",
@@ -137,51 +147,44 @@ async function checkForNewFiles() {
 }
 
 /**
- * Reads only the *new* bytes appended to the log file since lastReadPosition,
- * using a stream instead of loading the whole file into memory.
- * Returns [newCompleteLines, newLastReadPosition].
+ * Reads up to READ_CHUNK_BYTES of new data and only consumes whole lines.
+ * Returns [completeLines, newLastReadPosition]. The position always lands
+ * right after a newline, so no partial-line buffer is needed.
  */
-function readNewLogs(fileSize) {
-  return new Promise((resolve, reject) => {
-    const bytesToRead = fileSize - lastReadPosition;
+async function readNewLogs(fileSize) {
+  const bytesAvailable = fileSize - lastReadPosition;
+  if (bytesAvailable <= 0) return [[], lastReadPosition];
 
-    if (bytesToRead <= 0) {
-      resolve([[], lastReadPosition]);
-      return;
-    }
+  const toRead = Math.min(bytesAvailable, READ_CHUNK_BYTES);
+  const buffer = Buffer.allocUnsafe(toRead);
 
-    if (bytesToRead > MAX_CHUNK_BYTES) {
+  const handle = await fs.promises.open(currentLogFile, "r");
+  let bytesRead;
+  try {
+    ({ bytesRead } = await handle.read(buffer, 0, toRead, lastReadPosition));
+  } finally {
+    await handle.close();
+  }
+
+  if (bytesRead === 0) return [[], lastReadPosition];
+
+  const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
+
+  if (lastNewline === -1) {
+    if (bytesRead === READ_CHUNK_BYTES) {
+      // A single line longer than the whole chunk: skip it.
       reportError(
-        `New log data (${bytesToRead} bytes) exceeds safety cap of ${MAX_CHUNK_BYTES} bytes; skipping ahead to avoid excessive memory use.`,
+        `Skipped a log line longer than ${READ_CHUNK_BYTES} bytes.`,
         true,
       );
-      pendingPartialLine = "";
-      resolve([[], fileSize]);
-      return;
+      return [[], lastReadPosition + bytesRead];
     }
+    // Incomplete last line; wait for more data.
+    return [[], lastReadPosition];
+  }
 
-    const stream = fs.createReadStream(currentLogFile, {
-      encoding: "utf8",
-      start: lastReadPosition,
-      end: fileSize - 1,
-    });
-
-    let newData = pendingPartialLine;
-
-    stream.on("data", (chunk) => {
-      newData += chunk;
-    });
-
-    stream.on("end", () => {
-      const lines = newData.split("\n");
-      pendingPartialLine = lines.pop() || "";
-      resolve([lines, fileSize]);
-    });
-
-    stream.on("error", (err) => {
-      reject(err);
-    });
-  });
+  const text = buffer.toString("utf8", 0, lastNewline);
+  return [text.split("\n"), lastReadPosition + lastNewline + 1];
 }
 
 (async function monitorAndSend() {
@@ -189,12 +192,14 @@ function readNewLogs(fileSize) {
     await new Promise((resolve) => app.once("db-ready", resolve));
 
     while (true) {
+      let hasMore = false;
       await checkForNewFiles();
 
       if (currentLogFile) {
         const stats = await fs.promises.stat(currentLogFile);
 
         if (stats.size > lastReadPosition) {
+          const prevPosition = lastReadPosition;
           const [newLogs, newLastReadPosition] = await readNewLogs(stats.size);
 
           for (let i = 0; i < newLogs.length; i++) {
@@ -205,8 +210,6 @@ function readNewLogs(fileSize) {
             if (destMatch) {
               const { worldId, instanceId, tags } = parseDestination(destMatch);
               const instanceType = getInstanceType(tags);
-
-              //console.log(`Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`)
 
               main.log(
                 `Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`,
@@ -246,10 +249,13 @@ function readNewLogs(fileSize) {
               enqueueLogAvatar(avatarId, "system_log");
             }
           }
+
           lastReadPosition = newLastReadPosition;
+          // Still catching up on a backlog: skip the sleep and read the next chunk
+          hasMore =
+            lastReadPosition > prevPosition && lastReadPosition < stats.size;
         } else if (stats.size < lastReadPosition) {
           lastReadPosition = 0;
-          pendingPartialLine = "";
         }
       } else {
         main.log(
@@ -259,7 +265,9 @@ function readNewLogs(fileSize) {
         );
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (!hasMore) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
     }
   } catch (error) {
     reportError(`Error stack of monitor of VRChat: ${error.message}`, true);
