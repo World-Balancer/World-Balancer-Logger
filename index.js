@@ -146,25 +146,49 @@ let blockedKey = null; // e.g. "group:grp_..." so we notice a change of blocked 
  *                "group": [ { "id": "grp_...",  "name": "...", "comment": "..." }, ... ] }
  * An optional "reason" field is shown to the user instead of "comment".
  * Plain strings are accepted in the arrays as well.
- * Both "world" and "group" must be arrays, otherwise this throws and the
- * lists currently in use stay untouched.
+ * Both "world" and "group" must be arrays and every entry needs a valid id
+ * ("wrld_..." / "grp_..."), otherwise this throws and the lists currently in
+ * use stay untouched (a malformed list is never treated as "nothing blocked").
  */
+const BLACKLIST_ID_PATTERNS = {
+  world: /^wrld_[a-f0-9-]+$/i,
+  group: /^grp_[a-f0-9-]+$/i,
+};
+
+/**
+ * Every entry must have a well-formed id. One bad entry makes the whole list
+ * invalid (it throws), because skipping it would silently let that world or
+ * group through. Keys are lower-cased: VRChat writes ids in lower case.
+ */
+function parseBlacklistEntries(list, kind) {
+  const map = new Map();
+  list.forEach((entry, index) => {
+    const id = typeof entry === "string" ? entry : entry?.id;
+    if (
+      typeof id !== "string" ||
+      !BLACKLIST_ID_PATTERNS[kind].test(id.trim())
+    ) {
+      throw new Error(
+        `Blacklist ${kind}[${index}] has a missing or malformed id`,
+      );
+    }
+    map.set(
+      id.trim().toLowerCase(),
+      entry && typeof entry === "object" ? entry : {},
+    );
+  });
+  return map;
+}
+
 function parseBlacklist(data) {
   if (!data || !Array.isArray(data.world) || !Array.isArray(data.group)) {
     throw new Error('Blacklist must contain "world" and "group" arrays');
   }
 
-  const toMap = (list) => {
-    const map = new Map();
-    for (const entry of list) {
-      const id = typeof entry === "string" ? entry : entry?.id;
-      if (typeof id !== "string" || !id.trim()) continue;
-      map.set(id.trim(), entry && typeof entry === "object" ? entry : {});
-    }
-    return map;
+  return {
+    worlds: parseBlacklistEntries(data.world, "world"),
+    groups: parseBlacklistEntries(data.group, "group"),
   };
-
-  return { worlds: toMap(data.world), groups: toMap(data.group) };
 }
 
 function applyBlacklistData(data) {
@@ -193,14 +217,17 @@ function updateBlockedState() {
   let id = null;
   let entry = null;
 
-  if (currentWorldId && blockedWorlds.has(currentWorldId)) {
+  const worldKey = currentWorldId?.toLowerCase();
+  const groupKey = currentGroupId?.toLowerCase();
+
+  if (worldKey && blockedWorlds.has(worldKey)) {
     type = "world";
     id = currentWorldId;
-    entry = blockedWorlds.get(id);
-  } else if (currentGroupId && blockedGroups.has(currentGroupId)) {
+    entry = blockedWorlds.get(worldKey);
+  } else if (groupKey && blockedGroups.has(groupKey)) {
     type = "group";
     id = currentGroupId;
-    entry = blockedGroups.get(id);
+    entry = blockedGroups.get(groupKey);
   }
 
   const key = id ? `${type}:${id}` : null;
@@ -386,18 +413,31 @@ const DELIVERY_RETRY_MAX_MS = 5 * 60 * 1000;
  */
 async function deliverAvatar(avatarId) {
   let pause = DELIVERY_RETRY_MIN_MS;
+  let outcome = await enqueueLogAvatar(avatarId, "system_log");
 
-  while (true) {
-    const outcome = await enqueueLogAvatar(avatarId, "system_log");
-    if (outcome !== "fail") return outcome;
-
+  while (outcome === "fail" || outcome === "unsaved") {
     await sleep(pause);
     pause = Math.min(pause * 2, DELIVERY_RETRY_MAX_MS);
+
+    if (outcome === "unsaved") {
+      // The server has the avatar but its ID has not reached the disk yet:
+      // try to save it again (re-sending it would not help).
+      try {
+        await avatar_id_store.flushAll();
+        return "success";
+      } catch (err) {
+        reportError(`Saving avatar IDs failed again: ${err.message}`);
+        continue;
+      }
+    }
 
     // The failure unmarked the ID. Mark it again for the retry; if that says
     // it is already marked, a later sighting of the same ID is handling it.
     if (!(await avatar_id_store.checkAndMark(avatarId))) return "superseded";
+    outcome = await enqueueLogAvatar(avatarId, "system_log");
   }
+
+  return outcome;
 }
 
 /**

@@ -431,14 +431,37 @@ function normalizeDiscordId(raw) {
   return value !== "" ? value : null;
 }
 
+// Makes every ID confirmed so far durable. Confirmations that arrive together
+// (a whole batch succeeds at once) share one flush, but a flush that has
+// already started is never reused: an ID confirmed after it began could
+// otherwise be missing from what it writes.
+let flushTail = Promise.resolve();
+let flushQueued = null; // a flush that is waiting its turn and has not begun
+
+function flushConfirmedIds() {
+  if (flushQueued) return flushQueued;
+
+  const run = flushTail.then(() => {
+    flushQueued = null; // from here on, new confirmations need a new flush
+    return avatar_id_store.flushAll();
+  });
+  flushQueued = run;
+  flushTail = run.catch(() => {});
+  return run;
+}
+
 /**
  * Queues an avatar ID found in the log.
  * Resolves, never rejects, once the job has settled:
- *   "success" - the server accepted it (the ID is now saved to disk)
+ *   "success" - the server accepted it and its ID is saved to disk
+ *   "unsaved" - the server accepted it but saving the ID to disk failed
  *   "reject"  - the server refused it on its own
  *   "fail"    - it could not be delivered (the ID was unmarked for a retry)
  *   "ignored" - it was invalid or already waiting in the queue
  * The caller can use this to know when the event is no longer in flight.
+ * "success" is only reported after the ID is durable, so a caller that moves
+ * its saved log position forward on it can never skip an ID that a crash
+ * would then also have lost.
  */
 async function enqueueLogAvatar(avatarId) {
   let discordId = "system_log";
@@ -457,14 +480,22 @@ async function enqueueLogAvatar(avatarId) {
     const handled = enqueueAvatar({
       avatarId,
       userid: discordId,
-      onSuccess: (id) => {
+      onSuccess: async (id) => {
+        let outcome = "success";
         try {
           logToMain(`[LogSync] Synced extracted ID: ${id}`);
           // Only now is the ID saved to disk; until then a quit/crash just
           // means it gets sent again after restart.
-          avatar_id_store.confirm(id);
+          await avatar_id_store.confirm(id);
+          await flushConfirmedIds();
+        } catch (err) {
+          reportError(
+            `[LogSync] Could not save confirmed ID ${id}: ${err.message}`,
+            true,
+          );
+          outcome = "unsaved";
         } finally {
-          resolve("success");
+          resolve(outcome);
         }
       },
       onReject: (id, err) => {

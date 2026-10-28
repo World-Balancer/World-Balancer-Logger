@@ -147,14 +147,44 @@ async function postSwitchStatus(payload) {
   }
 }
 
+// Each user's requests are sent one after another, in the order they were
+// queued: with retries and slow connections, a newer status could otherwise
+// arrive first and then be overwritten by an older one. Different users do
+// not wait for each other.
+const lastRequestByUser = new Map(); // username -> promise of its latest request
+
 /**
- * Handles fetching discordId and sending the switch status to your API endpoint
+ * Sends the switch status to your API endpoint, after any earlier request for
+ * the same user has finished.
  * @param {string} username
  * @param {string} avatarName
  * @returns {Promise<boolean>} resolves (never rejects) once the request has
  *   finished: true if the server accepted it, false if it failed
  */
-async function enqueueSwitchStatus(username, avatarName) {
+function enqueueSwitchStatus(username, avatarName) {
+  const previous = lastRequestByUser.get(username) || Promise.resolve();
+  const request = previous.then(() => sendSwitchStatus(username, avatarName));
+
+  lastRequestByUser.set(username, request);
+  request
+    .finally(() => {
+      // Forget the user once nothing newer has been queued behind this request
+      if (lastRequestByUser.get(username) === request) {
+        lastRequestByUser.delete(username);
+      }
+    })
+    .catch(() => {}); // sendSwitchStatus never rejects; this only keeps it that way
+
+  return request;
+}
+
+/**
+ * Handles fetching discordId and sending the switch status to your API endpoint
+ * @param {string} username
+ * @param {string} avatarName
+ * @returns {Promise<boolean>} never rejects
+ */
+async function sendSwitchStatus(username, avatarName) {
   try {
     const discordId = normalizeDiscordId(await getConfig("Userid.discord_id"));
 
