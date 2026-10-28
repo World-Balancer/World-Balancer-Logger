@@ -30,11 +30,16 @@ const getConfig = require("../models/getConfig.js");
 const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
 
+// "lifo": reuse the most recently used idle connection first. The server (or a
+// proxy in front of it) closes idle connections after a while, and reusing an
+// old one is what produces "read ECONNRESET" on the first request after a
+// quiet period; with lifo the old ones are left to expire instead.
 const httpAgent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
+  scheduling: "lifo",
 });
 
 const httpsAgent = new https.Agent({
@@ -42,6 +47,7 @@ const httpsAgent = new https.Agent({
   keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
+  scheduling: "lifo",
 });
 
 const axiosInstance = axios.create({
@@ -97,6 +103,50 @@ function normalizeDiscordId(raw) {
   return value !== "" ? value : null;
 }
 
+const SWITCH_URL = "https://aswb.worldbalancer.com/v9/api/avatar-check";
+const MAX_SEND_RETRIES = 2;
+const RETRY_BASE_MS = 300; // 300 ms, then 600 ms
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Failures where the request most likely never reached the server's handler
+// (a dropped or refused connection, or the server asking us to come back), so
+// sending it again cannot create a duplicate. A timeout is deliberately NOT
+// here: the server may have processed the request and just been slow, and
+// repeating it would add load to a server that is already struggling.
+const CONNECTION_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "EPIPE",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+const RETRYABLE_STATUSES = new Set([429, 502, 503]);
+
+function isSafeToRetry(err) {
+  const status = err?.response?.status;
+  if (status) return RETRYABLE_STATUSES.has(status);
+  return CONNECTION_ERROR_CODES.has(err?.code);
+}
+
+async function postSwitchStatus(payload) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await axiosInstance.post(SWITCH_URL, payload);
+    } catch (err) {
+      if (attempt >= MAX_SEND_RETRIES || !isSafeToRetry(err)) throw err;
+
+      const wait = RETRY_BASE_MS * 2 ** attempt;
+      main.log(
+        `Switch status request failed (${err.code || err.response?.status}), retrying in ${wait}ms`,
+        "warn",
+        "main_log",
+      );
+      await sleep(wait);
+    }
+  }
+}
+
 /**
  * Handles fetching discordId and sending the switch status to your API endpoint
  * @param {string} username
@@ -114,10 +164,7 @@ async function enqueueSwitchStatus(username, avatarName) {
       ...(discordId && { discordId }),
     };
 
-    await axiosInstance.post(
-      "https://aswb.worldbalancer.com/v9/api/avatar-check",
-      payload,
-    );
+    await postSwitchStatus(payload);
 
     main.log(
       `Successfully sent API update for ${username}`,

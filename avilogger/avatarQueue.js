@@ -72,11 +72,15 @@ const NETWORK_ERROR_CODES = new Set([
   "EAI_AGAIN",
 ]);
 
+// "lifo": reuse the most recently used idle connection first, so connections
+// the server has already closed after a quiet period are left to expire
+// instead of being picked up (and failing with ECONNRESET).
 const httpAgent = new http.Agent({
   keepAlive: true,
   keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
+  scheduling: "lifo",
 });
 
 const httpsAgent = new https.Agent({
@@ -84,6 +88,7 @@ const httpsAgent = new https.Agent({
   keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
+  scheduling: "lifo",
 });
 
 const axiosInstance = axios.create({
