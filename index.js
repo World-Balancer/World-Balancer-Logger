@@ -355,19 +355,49 @@ let cursorSaveChain = Promise.resolve();
 function saveCursor() {
   cursorSaveChain = cursorSaveChain.then(async () => {
     try {
+      // Write a temp file, then rename it over the real one: a crash in the
+      // middle can never leave a half-written (unreadable) position behind.
+      const tempPath = `${cursorPath}.tmp`;
       await fs.promises.writeFile(
-        cursorPath,
+        tempPath,
         JSON.stringify({
           file: currentLogFile,
           id: currentFileId,
           position: resumePosition(),
         }),
       );
+      await fs.promises.rename(tempPath, cursorPath);
     } catch (err) {
       reportError(`Failed saving log position: ${err.message}`);
     }
   });
   return cursorSaveChain;
+}
+
+const DELIVERY_RETRY_MIN_MS = 30 * 1000;
+const DELIVERY_RETRY_MAX_MS = 5 * 60 * 1000;
+
+/**
+ * Delivers an avatar ID and resolves once it is no longer outstanding: the
+ * server accepted it, refused it on its own, or a later sighting took over.
+ * A delivery that fails even after the queue's own retries (server down, no
+ * network) is tried again with a growing pause, so the event stays pending,
+ * and the saved position stays behind it, until it has really been delivered.
+ */
+async function deliverAvatar(avatarId) {
+  let pause = DELIVERY_RETRY_MIN_MS;
+
+  while (true) {
+    const outcome = await enqueueLogAvatar(avatarId, "system_log");
+    if (outcome !== "fail") return outcome;
+
+    await sleep(pause);
+    pause = Math.min(pause * 2, DELIVERY_RETRY_MAX_MS);
+
+    // The failure unmarked the ID. Mark it again for the retry; if that says
+    // it is already marked, a later sighting of the same ID is handling it.
+    if (!(await avatar_id_store.checkAndMark(avatarId))) return "superseded";
+  }
 }
 
 /**
@@ -665,7 +695,7 @@ async function processAvatarLine(log, offset) {
   }
 
   main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
-  trackDelivery(offset, enqueueLogAvatar(avatarId, "system_log"));
+  trackDelivery(offset, deliverAvatar(avatarId));
 }
 
 /**
