@@ -39,6 +39,10 @@ const getConfig = require("./models/getConfig.js");
 const { log_error } = require("./functions/logsclass.js");
 const { avatar_id_store } = require("./functions/avatarIdStore.js");
 
+// Log files created after this moment were created while the app was running,
+// so their whole history is new to us.
+const APP_START_MS = Date.now();
+
 // Lazy match up to the FIRST "avatar" keyword, then take the rest of the line
 // as the name. (The old greedy `.*avatar\s+` latched onto the LAST "avatar"
 // in the line, so a name ending in "avatar" + a trailing "\r" came out empty.)
@@ -86,16 +90,21 @@ function getInstanceType(tags) {
 // no matter how large output_log grows.
 const READ_CHUNK_BYTES = 16 * 1024 * 1024; // 16 MB
 
-// If true, the first log file picked up after the app starts is read from its
-// current end (history is skipped). Log files created later are read from byte 0.
+// If true, a log file that already existed when the app started (and has no
+// saved read position) is read from its current end: its history is skipped.
+// Log files created while the app runs are always read from byte 0.
 const SKIP_BACKLOG_ON_STARTUP = true;
 
 if (!fs.existsSync(logpath)) fs.mkdirSync(logpath, { recursive: true });
 if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
 
+const cursorPath = path.join(configDir, "log-cursor.json");
+
 let currentLogFile = null;
+let currentFileId = null; // identity of currentLogFile, to notice a replaced file
 let lastReadPosition = 0;
 let isFirstFileSelection = true;
+let discardingOversizedLine = false; // inside a line longer than a whole chunk
 
 function reportError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
@@ -111,6 +120,7 @@ function reportError(message, emitToMain = false) {
 const BLACKLIST_URL =
   "https://raw.githubusercontent.com/World-Balancer/avatar-logging-system-blacklist/main/blacklist.json";
 const BLACKLIST_REFRESH_MS = 5 * 60 * 1000; // re-download every 5 minutes
+const BLACKLIST_RETRY_MS = 30 * 1000; // retry this often until a list is loaded
 const BLACKLIST_FETCH_TIMEOUT_MS = 10 * 1000;
 const blacklistCachePath = path.join(configDir, "blacklist-cache.json");
 
@@ -120,9 +130,14 @@ let blockedWorlds = new Map();
 let blockedGroups = new Map();
 let blacklistEtag = null; // ETag of the last blacklist we downloaded successfully
 
+// Fail closed: nothing is read or sent until a valid blacklist (downloaded or
+// cached) has been loaded at least once.
+let blacklistLoaded = false;
+
 // What instance the player is currently in, and whether it is blocked
 let currentWorldId = null;
 let currentGroupId = null;
+let destinationKnown = false; // events are ignored until a destination is seen
 let isBlocked = false;
 let blockedKey = null; // e.g. "group:grp_..." so we notice a change of blocked instance
 
@@ -131,11 +146,17 @@ let blockedKey = null; // e.g. "group:grp_..." so we notice a change of blocked 
  *                "group": [ { "id": "grp_...",  "name": "...", "comment": "..." }, ... ] }
  * An optional "reason" field is shown to the user instead of "comment".
  * Plain strings are accepted in the arrays as well.
+ * Both "world" and "group" must be arrays, otherwise this throws and the
+ * lists currently in use stay untouched.
  */
-function applyBlacklistData(data) {
+function parseBlacklist(data) {
+  if (!data || !Array.isArray(data.world) || !Array.isArray(data.group)) {
+    throw new Error('Blacklist must contain "world" and "group" arrays');
+  }
+
   const toMap = (list) => {
     const map = new Map();
-    for (const entry of Array.isArray(list) ? list : []) {
+    for (const entry of list) {
       const id = typeof entry === "string" ? entry : entry?.id;
       if (typeof id !== "string" || !id.trim()) continue;
       map.set(id.trim(), entry && typeof entry === "object" ? entry : {});
@@ -143,22 +164,25 @@ function applyBlacklistData(data) {
     return map;
   };
 
-  blockedWorlds = toMap(data?.world);
-  blockedGroups = toMap(data?.group);
+  return { worlds: toMap(data.world), groups: toMap(data.group) };
+}
+
+function applyBlacklistData(data) {
+  const { worlds, groups } = parseBlacklist(data); // throws before any change
+  blockedWorlds = worlds;
+  blockedGroups = groups;
+  blacklistLoaded = true;
 }
 
 function loadBlacklistCache() {
   try {
-    if (fs.existsSync(blacklistCachePath)) {
-      applyBlacklistData(
-        JSON.parse(fs.readFileSync(blacklistCachePath, "utf8")),
-      );
-      main.log(
-        `Loaded cached blacklist (${blockedWorlds.size} worlds, ${blockedGroups.size} groups)`,
-        "info",
-        "main_log",
-      );
-    }
+    if (!fs.existsSync(blacklistCachePath)) return;
+    applyBlacklistData(JSON.parse(fs.readFileSync(blacklistCachePath, "utf8")));
+    main.log(
+      `Loaded cached blacklist (${blockedWorlds.size} worlds, ${blockedGroups.size} groups)`,
+      "info",
+      "main_log",
+    );
   } catch (err) {
     reportError(`Failed reading blacklist cache: ${err.message}`);
   }
@@ -198,26 +222,46 @@ function updateBlockedState() {
   }
 }
 
+/**
+ * Downloads the blacklist. Resolves to { text, etag }, or null when the
+ * server says nothing changed (304 Not Modified).
+ */
+async function fetchBlacklist() {
+  const headers = {};
+  if (blacklistEtag) headers["If-None-Match"] = blacklistEtag;
+
+  const res = await fetch(BLACKLIST_URL, {
+    headers,
+    cache: "no-store",
+    signal: AbortSignal.timeout(BLACKLIST_FETCH_TIMEOUT_MS),
+  });
+
+  if (res.status === 304) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  return { text: await res.text(), etag: res.headers.get("etag") };
+}
+
+async function saveBlacklistCache(text) {
+  try {
+    await fs.promises.writeFile(blacklistCachePath, text);
+  } catch (err) {
+    // Not fatal: the lists are already active in memory
+    reportError(`Failed writing blacklist cache: ${err.message}`);
+  }
+}
+
 async function refreshBlacklist() {
   try {
-    // Conditional request: if the file hasn't changed, GitHub answers
-    // "304 Not Modified" with no body and we keep the lists we already have.
-    const headers = {};
-    if (blacklistEtag) headers["If-None-Match"] = blacklistEtag;
+    const result = await fetchBlacklist();
+    if (!result) return; // unchanged since the last download
 
-    const res = await fetch(BLACKLIST_URL, {
-      headers,
-      cache: "no-store",
-      signal: AbortSignal.timeout(BLACKLIST_FETCH_TIMEOUT_MS),
-    });
+    // Throws on bad JSON or a wrong shape, keeping the last good lists
+    applyBlacklistData(JSON.parse(result.text));
+    blacklistEtag = result.etag; // only remembered after a good parse
 
-    if (res.status === 304) return; // unchanged since the last download
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const text = await res.text();
-    applyBlacklistData(JSON.parse(text)); // throws on bad JSON, keeps old lists
-    blacklistEtag = res.headers.get("etag"); // only remembered after a good parse
-    await fs.promises.writeFile(blacklistCachePath, text);
+    // Apply to the instance the player is in right now, before anything slow
+    updateBlockedState();
 
     main.log(
       `Blacklist updated (${blockedWorlds.size} worlds, ${blockedGroups.size} groups)`,
@@ -225,12 +269,30 @@ async function refreshBlacklist() {
       "main_log",
     );
 
-    // An entry added while the player is already in that instance applies at once
-    updateBlockedState();
+    await saveBlacklistCache(result.text);
   } catch (err) {
     // Keep using the last good lists (in memory or from the cache file)
     reportError(`Failed refreshing blacklist: ${err.message}`, true);
   }
+}
+
+/**
+ * Refreshes every BLACKLIST_REFRESH_MS, or every BLACKLIST_RETRY_MS while no
+ * valid list has been loaded yet (reading stays paused until one is).
+ */
+function scheduleBlacklistRefresh() {
+  const delay = blacklistLoaded ? BLACKLIST_REFRESH_MS : BLACKLIST_RETRY_MS;
+  setTimeout(async () => {
+    await refreshBlacklist();
+    scheduleBlacklistRefresh();
+  }, delay);
+}
+
+function resetInstanceState() {
+  currentWorldId = null;
+  currentGroupId = null;
+  destinationKnown = false;
+  updateBlockedState();
 }
 
 function handleDestination(destMatch) {
@@ -247,37 +309,110 @@ function handleDestination(destMatch) {
 
   currentWorldId = worldId;
   currentGroupId = typeof tags.group === "string" ? tags.group : null;
+  destinationKnown = true;
   updateBlockedState();
 }
 
+// ---------------------------------------------------------------------------
+// Log file position (so a restart resumes instead of skipping or replaying)
+// ---------------------------------------------------------------------------
+
+function fileIdentity(stats) {
+  return `${stats.dev}:${stats.ino}:${Math.round(stats.birthtimeMs)}`;
+}
+
+function loadCursor() {
+  try {
+    return JSON.parse(fs.readFileSync(cursorPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function saveCursor() {
+  try {
+    await fs.promises.writeFile(
+      cursorPath,
+      JSON.stringify({
+        file: currentLogFile,
+        id: currentFileId,
+        position: lastReadPosition,
+      }),
+    );
+  } catch (err) {
+    reportError(`Failed saving log position: ${err.message}`);
+  }
+}
+
 /**
- * Scans backwards from the end of the log (up to ~64 MB) for the most recent
- * "Destination set" line. Used when the app starts mid-session and skips the
- * backlog, so it still knows which instance the player is already in.
+ * Moves a byte offset back to the start of the line it falls in, so a line
+ * that is only partly written is read again once it is complete.
  */
-async function findLastDestination(file, size) {
+async function alignToLineStart(file, offset) {
+  if (offset === 0) return 0;
+
+  const length = Math.min(offset, 64 * 1024);
+  const buffer = Buffer.allocUnsafe(length);
+  const handle = await fs.promises.open(file, "r");
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, length, offset - length);
+    const newline = buffer.lastIndexOf(0x0a, bytesRead - 1);
+    return newline === -1 ? offset : offset - bytesRead + newline + 1;
+  } finally {
+    await handle.close();
+  }
+}
+
+function lastDestinationIn(buffer) {
+  const lines = buffer.toString("utf8").split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const match = lines[i].match(DESTINATION_REGEX);
+    if (match) return match;
+  }
+  return null;
+}
+
+/**
+ * Scans backwards from `endPos` (a line start) for the most recent
+ * "Destination set" line, however far back it is. Used when starting
+ * mid-session so we know which instance the player is already in.
+ * Only complete lines are matched: the first line of each block may continue
+ * from the previous block, so it is carried over and joined before matching.
+ */
+async function findLastDestination(file, endPos) {
   const BLOCK = 8 * 1024 * 1024;
-  const MAX_SCAN = 64 * 1024 * 1024;
-  const OVERLAP = 4096; // so a line cut at a block edge is still seen whole
+  const MAX_CARRY = 64 * 1024 * 1024; // give up on absurdly long single lines
 
   const handle = await fs.promises.open(file, "r");
   try {
-    let end = size;
-    let scanned = 0;
+    let end = endPos;
+    let carry = Buffer.alloc(0); // start of a line that began in a later block
 
-    while (end > 0 && scanned < MAX_SCAN) {
+    while (end > 0) {
       const start = Math.max(0, end - BLOCK);
-      const buffer = Buffer.allocUnsafe(end - start);
-      const { bytesRead } = await handle.read(buffer, 0, end - start, start);
+      const block = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await handle.read(block, 0, end - start, start);
+      const data = Buffer.concat([block.subarray(0, bytesRead), carry]);
 
-      const lines = buffer.toString("utf8", 0, bytesRead).split(/\r?\n/);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const match = lines[i].match(DESTINATION_REGEX);
-        if (match) return match;
+      let complete = data;
+      carry = Buffer.alloc(0);
+
+      if (start > 0) {
+        // Bytes before the first newline may be the tail of a line that
+        // begins in an earlier block, so they are not matched yet.
+        const firstNewline = data.indexOf(0x0a);
+        if (firstNewline === -1) {
+          if (data.length <= MAX_CARRY) carry = data;
+          end = start;
+          continue;
+        }
+        carry = data.subarray(0, firstNewline);
+        complete = data.subarray(firstNewline + 1);
       }
 
-      scanned += end - start;
-      end = start > 0 ? start + OVERLAP : 0;
+      const match = lastDestinationIn(complete);
+      if (match) return match;
+      end = start;
     }
   } finally {
     await handle.close();
@@ -287,57 +422,82 @@ async function findLastDestination(file, size) {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Where to start reading a log file we have just selected.
+ */
+async function resolveStartPosition(file, stats, isStartup) {
+  // A log VRChat creates while we run: read it all
+  if (!isStartup) return 0;
+
+  // Resume where the previous run stopped, if it is still the same file
+  const saved = loadCursor();
+  if (
+    saved &&
+    saved.file === file &&
+    saved.id === fileIdentity(stats) &&
+    Number.isInteger(saved.position) &&
+    saved.position <= stats.size
+  ) {
+    return saved.position;
+  }
+
+  // VRChat started after us: nothing in this file is old
+  if (stats.birthtimeMs >= APP_START_MS) return 0;
+
+  if (!SKIP_BACKLOG_ON_STARTUP) return 0;
+  return alignToLineStart(file, stats.size);
+}
+
+/**
+ * Selects a log file. Everything that can fail runs first; the module state
+ * is only changed afterwards, so a failure is simply retried on the next poll.
+ */
+async function selectLogFile(latestLogFile) {
+  const stats = await fs.promises.stat(latestLogFile);
+  const position = await resolveStartPosition(
+    latestLogFile,
+    stats,
+    isFirstFileSelection,
+  );
+  const lastDestination =
+    position > 0 ? await findLastDestination(latestLogFile, position) : null;
+
+  currentLogFile = latestLogFile;
+  currentFileId = fileIdentity(stats);
+  lastReadPosition = position;
+  discardingOversizedLine = false;
+  isFirstFileSelection = false;
+
+  // New log = new VRChat session: forget the previous instance
+  resetInstanceState();
+  if (lastDestination) handleDestination(lastDestination);
+
+  await saveCursor();
+  main.log(`Switching to new log file: ${currentLogFile}`, "info", "main_log");
+}
+
+async function findLatestLogFile() {
+  const logDirectory = await getConfig("Directories.LogDirectory");
+
+  if (!logDirectory) {
+    reportError("Log directory path is missing or null.");
+    return null;
+  }
+
+  const logFileNames = (await fs.promises.readdir(logDirectory)).filter(
+    (name) => name?.startsWith("output_log"),
+  );
+  if (logFileNames.length === 0) return null;
+
+  logFileNames.sort();
+  return path.join(logDirectory, logFileNames[logFileNames.length - 1]);
+}
+
 async function checkForNewFiles() {
   try {
-    const logDirectory = await getConfig("Directories.LogDirectory");
-
-    if (!logDirectory) {
-      reportError("Log directory path is missing or null.");
-      return;
-    }
-
-    const logFileNames = await fs.promises.readdir(logDirectory);
-    const newLogFileNames = logFileNames.filter((name) =>
-      name?.startsWith("output_log"),
-    );
-
-    if (newLogFileNames.length > 0) {
-      newLogFileNames.sort();
-      const latestLogFile = path.join(
-        logDirectory,
-        newLogFileNames[newLogFileNames.length - 1],
-      );
-
-      if (latestLogFile !== currentLogFile) {
-        currentLogFile = latestLogFile;
-
-        // New log = new VRChat session: forget the previous instance
-        currentWorldId = null;
-        currentGroupId = null;
-        updateBlockedState();
-
-        if (isFirstFileSelection && SKIP_BACKLOG_ON_STARTUP) {
-          // Skip history that existed before the app started...
-          const { size } = await fs.promises.stat(currentLogFile);
-          lastReadPosition = size;
-
-          // ...but still work out which instance the player is in right now
-          const lastDestination = await findLastDestination(
-            currentLogFile,
-            size,
-          );
-          if (lastDestination) handleDestination(lastDestination);
-        } else {
-          lastReadPosition = 0;
-        }
-        isFirstFileSelection = false;
-
-        main.log(
-          `Switching to new log file: ${currentLogFile}`,
-          "info",
-          "main_log",
-        );
-      }
+    const latestLogFile = await findLatestLogFile();
+    if (latestLogFile && latestLogFile !== currentLogFile) {
+      await selectLogFile(latestLogFile);
     }
   } catch (err) {
     reportError(`Failed reading directory structures: ${err.message}`, true);
@@ -347,7 +507,8 @@ async function checkForNewFiles() {
 /**
  * Reads up to READ_CHUNK_BYTES of new data and only consumes whole lines.
  * Returns [completeLines, newLastReadPosition]. The position always lands
- * right after a newline, so no partial-line buffer is needed.
+ * right after a newline (or after discarded bytes of an oversized line), so
+ * no partial-line buffer is needed.
  */
 async function readNewLogs(fileSize) {
   const bytesAvailable = fileSize - lastReadPosition;
@@ -365,23 +526,35 @@ async function readNewLogs(fileSize) {
   }
 
   if (bytesRead === 0) return [[], lastReadPosition];
+  const data = buffer.subarray(0, bytesRead);
 
-  const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
+  // Inside an oversized line: throw bytes away until its newline is reached
+  let start = 0;
+  if (discardingOversizedLine) {
+    const newline = data.indexOf(0x0a);
+    if (newline === -1) return [[], lastReadPosition + bytesRead];
+    discardingOversizedLine = false;
+    start = newline + 1;
+  }
 
-  if (lastNewline === -1) {
-    if (bytesRead === READ_CHUNK_BYTES) {
-      // A single line longer than the whole chunk: skip it.
+  const lastNewline = data.lastIndexOf(0x0a);
+
+  if (lastNewline < start) {
+    if (start === 0 && bytesRead === READ_CHUNK_BYTES) {
+      // A single line longer than the whole chunk: skip it, including every
+      // later chunk of it, until its newline.
       reportError(
         `Skipped a log line longer than ${READ_CHUNK_BYTES} bytes.`,
         true,
       );
+      discardingOversizedLine = true;
       return [[], lastReadPosition + bytesRead];
     }
     // Incomplete last line; wait for more data.
-    return [[], lastReadPosition];
+    return [[], lastReadPosition + start];
   }
 
-  const text = buffer.toString("utf8", 0, lastNewline);
+  const text = data.toString("utf8", start, lastNewline);
   // VRChat logs on Windows use \r\n; strip the \r so it never ends up in a match
   return [text.split(/\r?\n/), lastReadPosition + lastNewline + 1];
 }
@@ -419,6 +592,9 @@ async function processAvatarLine(log) {
   const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
   if (!isNewAvatarId) return;
 
+  // A blacklist refresh may have blocked this instance while we were waiting
+  if (isBlocked) return;
+
   main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
   enqueueLogAvatar(avatarId, "system_log");
 }
@@ -434,6 +610,9 @@ async function processLogLine(log) {
     handleDestination(destMatch);
     return;
   }
+
+  // Which instance this line belongs to is not known yet: ignore it
+  if (!destinationKnown) return;
 
   // In a blacklisted world/group: skip switch and avatar handling.
   // (Avatar IDs are NOT marked as seen, so they are still logged
@@ -457,8 +636,21 @@ async function readAndProcessNewLogs(fileSize) {
   }
 
   lastReadPosition = newLastReadPosition;
+  if (lastReadPosition !== prevPosition) await saveCursor();
+
   // Still catching up on a backlog: skip the sleep and read the next chunk
   return lastReadPosition > prevPosition && lastReadPosition < fileSize;
+}
+
+/**
+ * The selected log file was replaced or truncated: start it over.
+ */
+async function restartLogFile(stats) {
+  currentFileId = fileIdentity(stats);
+  lastReadPosition = 0;
+  discardingOversizedLine = false;
+  resetInstanceState();
+  await saveCursor();
 }
 
 /**
@@ -476,19 +668,34 @@ async function pollLogFile() {
     return false;
   }
 
-  const { size } = await fs.promises.stat(currentLogFile);
+  // Nothing is read (so nothing is skipped) until a blacklist is available
+  if (!blacklistLoaded) return false;
 
-  if (size < lastReadPosition) {
-    // File was truncated / replaced: start over
-    lastReadPosition = 0;
+  const stats = await fs.promises.stat(currentLogFile);
+
+  // Replaced (even if it has already grown past our position) or truncated
+  if (fileIdentity(stats) !== currentFileId || stats.size < lastReadPosition) {
+    await restartLogFile(stats);
     return false;
   }
-  if (size === lastReadPosition) return false;
 
-  return readAndProcessNewLogs(size);
+  if (stats.size === lastReadPosition) return false;
+
+  return readAndProcessNewLogs(stats.size);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A failed poll (file deleted mid-read, transient I/O error) is retried on the
+// next loop instead of stopping the monitor for good.
+async function pollSafely() {
+  try {
+    return await pollLogFile();
+  } catch (err) {
+    reportError(`Log poll failed, retrying: ${err.message}`, true);
+    return false;
+  }
+}
 
 (async function monitorAndSend() {
   try {
@@ -497,10 +704,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     // Use the last saved blacklist right away, then fetch a fresh copy
     loadBlacklistCache();
     await refreshBlacklist();
-    setInterval(refreshBlacklist, BLACKLIST_REFRESH_MS);
+    scheduleBlacklistRefresh();
 
     while (true) {
-      const hasMore = await pollLogFile();
+      const hasMore = await pollSafely();
       if (!hasMore) await sleep(1000);
     }
   } catch (error) {
