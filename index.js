@@ -39,7 +39,10 @@ const getConfig = require("./models/getConfig.js");
 const { log_error } = require("./functions/logsclass.js");
 const { avatar_id_store } = require("./functions/avatarIdStore.js");
 
-const SWITCH_REGEX = /Switching\s+(.*?)\s+to.*avatar\s+(.*)/;
+// Lazy match up to the FIRST "avatar" keyword, then take the rest of the line
+// as the name. (The old greedy `.*avatar\s+` latched onto the LAST "avatar"
+// in the line, so a name ending in "avatar" + a trailing "\r" came out empty.)
+const SWITCH_REGEX = /Switching\s+(.+?)\s+to\s+.*?avatar\s+(.+?)\s*$/;
 const AVATAR_API_REGEX = /avatars\/(avtr_[a-f0-9-]+)/;
 const ASSET_BUNDLE_REGEX = /\[AssetBundleDownloadManager\].*?(avtr_[a-f0-9-]+)/;
 
@@ -184,7 +187,8 @@ async function readNewLogs(fileSize) {
   }
 
   const text = buffer.toString("utf8", 0, lastNewline);
-  return [text.split("\n"), lastReadPosition + lastNewline + 1];
+  // VRChat logs on Windows use \r\n; strip the \r so it never ends up in a match
+  return [text.split(/\r?\n/), lastReadPosition + lastNewline + 1];
 }
 
 (async function monitorAndSend() {
@@ -222,13 +226,23 @@ async function readNewLogs(fileSize) {
             if (switchMatch) {
               const username = switchMatch[1].trim();
               const avatarName = switchMatch[2].trim();
-              main.log(
-                `User ${username} switching to ${avatarName}`,
-                "info",
-                "main_log",
-              );
 
-              enqueueSwitchStatus(username, avatarName);
+              if (!username || !avatarName) {
+                // Never send an empty name to the API (it answers 400)
+                main.log(
+                  `Skipped switch line with empty name: ${log}`,
+                  "warn",
+                  "main_log",
+                );
+              } else {
+                main.log(
+                  `User ${username} switching to ${avatarName}`,
+                  "info",
+                  "main_log",
+                );
+
+                enqueueSwitchStatus(username, avatarName);
+              }
             }
 
             const apiMatch = log.match(AVATAR_API_REGEX);
