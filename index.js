@@ -104,6 +104,177 @@ function reportError(message, emitToMain = false) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Blacklist (world ids + group ids that must NOT be sent to our server)
+// ---------------------------------------------------------------------------
+
+const BLACKLIST_URL =
+  "https://raw.githubusercontent.com/World-Balancer/avatar-logging-system-blacklist/main/blacklist.json";
+const BLACKLIST_REFRESH_MS = 5 * 60 * 1000; // re-download every 5 minutes
+const BLACKLIST_FETCH_TIMEOUT_MS = 10 * 1000;
+const blacklistCachePath = path.join(configDir, "blacklist-cache.json");
+
+let blockedWorlds = new Set();
+let blockedGroups = new Set();
+let blacklistEtag = null; // ETag of the last blacklist we downloaded successfully
+
+// What instance the player is currently in, and whether it is blocked
+let currentWorldId = null;
+let currentGroupId = null;
+let isBlocked = false;
+
+/**
+ * File format: { "world": [ { "id": "wrld_..." }, ... ],
+ *                "group": [ { "id": "grp_..." }, ... ] }
+ * Plain strings are accepted in the arrays as well.
+ */
+function applyBlacklistData(data) {
+  const toSet = (list) =>
+    new Set(
+      (Array.isArray(list) ? list : [])
+        .map((entry) => (typeof entry === "string" ? entry : entry?.id))
+        .filter((id) => typeof id === "string" && id.trim())
+        .map((id) => id.trim()),
+    );
+
+  blockedWorlds = toSet(data?.world);
+  blockedGroups = toSet(data?.group);
+}
+
+function loadBlacklistCache() {
+  try {
+    if (fs.existsSync(blacklistCachePath)) {
+      applyBlacklistData(
+        JSON.parse(fs.readFileSync(blacklistCachePath, "utf8")),
+      );
+      main.log(
+        `Loaded cached blacklist (${blockedWorlds.size} worlds, ${blockedGroups.size} groups)`,
+        "info",
+        "main_log",
+      );
+    }
+  } catch (err) {
+    reportError(`Failed reading blacklist cache: ${err.message}`);
+  }
+}
+
+function updateBlockedState() {
+  const worldBlocked = Boolean(
+    currentWorldId && blockedWorlds.has(currentWorldId),
+  );
+  const groupBlocked = Boolean(
+    currentGroupId && blockedGroups.has(currentGroupId),
+  );
+  const nowBlocked = worldBlocked || groupBlocked;
+
+  if (nowBlocked !== isBlocked) {
+    isBlocked = nowBlocked;
+    if (isBlocked) {
+      const what = worldBlocked
+        ? `world ${currentWorldId}`
+        : `group ${currentGroupId}`;
+      main.log(
+        `Blacklisted ${what}: not sending data while in this instance`,
+        "warn",
+        "main_log",
+      );
+    } else {
+      main.log(
+        "Left blacklisted instance: sending resumed",
+        "info",
+        "main_log",
+      );
+    }
+  }
+}
+
+async function refreshBlacklist() {
+  try {
+    // Conditional request: if the file hasn't changed, GitHub answers
+    // "304 Not Modified" with no body and we keep the lists we already have.
+    const headers = {};
+    if (blacklistEtag) headers["If-None-Match"] = blacklistEtag;
+
+    const res = await fetch(BLACKLIST_URL, {
+      headers,
+      cache: "no-store",
+      signal: AbortSignal.timeout(BLACKLIST_FETCH_TIMEOUT_MS),
+    });
+
+    if (res.status === 304) return; // unchanged since the last download
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const text = await res.text();
+    applyBlacklistData(JSON.parse(text)); // throws on bad JSON, keeps old lists
+    blacklistEtag = res.headers.get("etag"); // only remembered after a good parse
+    await fs.promises.writeFile(blacklistCachePath, text);
+
+    main.log(
+      `Blacklist updated (${blockedWorlds.size} worlds, ${blockedGroups.size} groups)`,
+      "info",
+      "main_log",
+    );
+
+    // An entry added while the player is already in that instance applies at once
+    updateBlockedState();
+  } catch (err) {
+    // Keep using the last good lists (in memory or from the cache file)
+    reportError(`Failed refreshing blacklist: ${err.message}`, true);
+  }
+}
+
+function handleDestination(destMatch) {
+  const { worldId, instanceId, tags } = parseDestination(destMatch);
+  const instanceType = getInstanceType(tags);
+
+  main.log(
+    `Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`,
+    "info",
+    "main_log",
+  );
+
+  currentWorldId = worldId;
+  currentGroupId = typeof tags.group === "string" ? tags.group : null;
+  updateBlockedState();
+}
+
+/**
+ * Scans backwards from the end of the log (up to ~64 MB) for the most recent
+ * "Destination set" line. Used when the app starts mid-session and skips the
+ * backlog, so it still knows which instance the player is already in.
+ */
+async function findLastDestination(file, size) {
+  const BLOCK = 8 * 1024 * 1024;
+  const MAX_SCAN = 64 * 1024 * 1024;
+  const OVERLAP = 4096; // so a line cut at a block edge is still seen whole
+
+  const handle = await fs.promises.open(file, "r");
+  try {
+    let end = size;
+    let scanned = 0;
+
+    while (end > 0 && scanned < MAX_SCAN) {
+      const start = Math.max(0, end - BLOCK);
+      const buffer = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await handle.read(buffer, 0, end - start, start);
+
+      const lines = buffer.toString("utf8", 0, bytesRead).split(/\r?\n/);
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const match = lines[i].match(DESTINATION_REGEX);
+        if (match) return match;
+      }
+
+      scanned += end - start;
+      end = start > 0 ? start + OVERLAP : 0;
+    }
+  } finally {
+    await handle.close();
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+
 async function checkForNewFiles() {
   try {
     const logDirectory = await getConfig("Directories.LogDirectory");
@@ -128,10 +299,22 @@ async function checkForNewFiles() {
       if (latestLogFile !== currentLogFile) {
         currentLogFile = latestLogFile;
 
+        // New log = new VRChat session: forget the previous instance
+        currentWorldId = null;
+        currentGroupId = null;
+        updateBlockedState();
+
         if (isFirstFileSelection && SKIP_BACKLOG_ON_STARTUP) {
-          // Skip history that existed before the app started
+          // Skip history that existed before the app started...
           const { size } = await fs.promises.stat(currentLogFile);
           lastReadPosition = size;
+
+          // ...but still work out which instance the player is in right now
+          const lastDestination = await findLastDestination(
+            currentLogFile,
+            size,
+          );
+          if (lastDestination) handleDestination(lastDestination);
         } else {
           lastReadPosition = 0;
         }
@@ -195,6 +378,11 @@ async function readNewLogs(fileSize) {
   try {
     await new Promise((resolve) => app.once("db-ready", resolve));
 
+    // Use the last saved blacklist right away, then fetch a fresh copy
+    loadBlacklistCache();
+    await refreshBlacklist();
+    setInterval(refreshBlacklist, BLACKLIST_REFRESH_MS);
+
     while (true) {
       let hasMore = false;
       await checkForNewFiles();
@@ -210,17 +398,18 @@ async function readNewLogs(fileSize) {
             const log = newLogs[i];
             if (!log) continue;
 
+            // Destination lines are always processed: they decide whether
+            // the instance the player is in is blacklisted.
             const destMatch = log.match(DESTINATION_REGEX);
             if (destMatch) {
-              const { worldId, instanceId, tags } = parseDestination(destMatch);
-              const instanceType = getInstanceType(tags);
-
-              main.log(
-                `Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`,
-                "info",
-                "main_log",
-              );
+              handleDestination(destMatch);
+              continue;
             }
+
+            // In a blacklisted world/group: skip switchMatch and apiMatch.
+            // (Avatar IDs are NOT marked as seen, so they are still logged
+            // later if the player sees them in an allowed instance.)
+            if (isBlocked) continue;
 
             const switchMatch = log.match(SWITCH_REGEX);
             if (switchMatch) {
