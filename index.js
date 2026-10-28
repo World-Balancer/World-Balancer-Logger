@@ -386,6 +386,110 @@ async function readNewLogs(fileSize) {
   return [text.split(/\r?\n/), lastReadPosition + lastNewline + 1];
 }
 
+/**
+ * Handles a "Switching <user> to avatar <name>" line.
+ */
+function processSwitchLine(log) {
+  const switchMatch = log.match(SWITCH_REGEX);
+  if (!switchMatch) return;
+
+  const username = switchMatch[1].trim();
+  const avatarName = switchMatch[2].trim();
+
+  if (!username || !avatarName) {
+    // Never send an empty name to the API (it answers 400)
+    main.log(`Skipped switch line with empty name: ${log}`, "warn", "main_log");
+    return;
+  }
+
+  main.log(`User ${username} switching to ${avatarName}`, "info", "main_log");
+  enqueueSwitchStatus(username, avatarName);
+}
+
+/**
+ * Handles lines that contain an avatar ID (API URL or asset bundle download).
+ */
+async function processAvatarLine(log) {
+  const avatarIdMatch =
+    log.match(AVATAR_API_REGEX) || log.match(ASSET_BUNDLE_REGEX);
+  if (!avatarIdMatch) return;
+
+  const avatarId = avatarIdMatch[1];
+
+  const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
+  if (!isNewAvatarId) return;
+
+  main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
+  enqueueLogAvatar(avatarId, "system_log");
+}
+
+/**
+ * Routes one log line to the right handler.
+ */
+async function processLogLine(log) {
+  // Destination lines are always processed: they decide whether
+  // the instance the player is in is blacklisted.
+  const destMatch = log.match(DESTINATION_REGEX);
+  if (destMatch) {
+    handleDestination(destMatch);
+    return;
+  }
+
+  // In a blacklisted world/group: skip switch and avatar handling.
+  // (Avatar IDs are NOT marked as seen, so they are still logged
+  // later if the player sees them in an allowed instance.)
+  if (isBlocked) return;
+
+  processSwitchLine(log);
+  await processAvatarLine(log);
+}
+
+/**
+ * Reads and processes one chunk of new log data.
+ * Returns true if more data is waiting (so the caller can skip its sleep).
+ */
+async function readAndProcessNewLogs(fileSize) {
+  const prevPosition = lastReadPosition;
+  const [newLogs, newLastReadPosition] = await readNewLogs(fileSize);
+
+  for (const log of newLogs) {
+    if (log) await processLogLine(log);
+  }
+
+  lastReadPosition = newLastReadPosition;
+  // Still catching up on a backlog: skip the sleep and read the next chunk
+  return lastReadPosition > prevPosition && lastReadPosition < fileSize;
+}
+
+/**
+ * One monitor iteration. Returns true if more data is waiting.
+ */
+async function pollLogFile() {
+  await checkForNewFiles();
+
+  if (!currentLogFile) {
+    main.log(
+      "No log file selected. Waiting for a new log file...",
+      "info",
+      "main_log",
+    );
+    return false;
+  }
+
+  const { size } = await fs.promises.stat(currentLogFile);
+
+  if (size < lastReadPosition) {
+    // File was truncated / replaced: start over
+    lastReadPosition = 0;
+    return false;
+  }
+  if (size === lastReadPosition) return false;
+
+  return readAndProcessNewLogs(size);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 (async function monitorAndSend() {
   try {
     await new Promise((resolve) => app.once("db-ready", resolve));
@@ -396,93 +500,8 @@ async function readNewLogs(fileSize) {
     setInterval(refreshBlacklist, BLACKLIST_REFRESH_MS);
 
     while (true) {
-      let hasMore = false;
-      await checkForNewFiles();
-
-      if (currentLogFile) {
-        const stats = await fs.promises.stat(currentLogFile);
-
-        if (stats.size > lastReadPosition) {
-          const prevPosition = lastReadPosition;
-          const [newLogs, newLastReadPosition] = await readNewLogs(stats.size);
-
-          for (let i = 0; i < newLogs.length; i++) {
-            const log = newLogs[i];
-            if (!log) continue;
-
-            // Destination lines are always processed: they decide whether
-            // the instance the player is in is blacklisted.
-            const destMatch = log.match(DESTINATION_REGEX);
-            if (destMatch) {
-              handleDestination(destMatch);
-              continue;
-            }
-
-            // In a blacklisted world/group: skip switchMatch and apiMatch.
-            // (Avatar IDs are NOT marked as seen, so they are still logged
-            // later if the player sees them in an allowed instance.)
-            if (isBlocked) continue;
-
-            const switchMatch = log.match(SWITCH_REGEX);
-            if (switchMatch) {
-              const username = switchMatch[1].trim();
-              const avatarName = switchMatch[2].trim();
-
-              if (!username || !avatarName) {
-                // Never send an empty name to the API (it answers 400)
-                main.log(
-                  `Skipped switch line with empty name: ${log}`,
-                  "warn",
-                  "main_log",
-                );
-              } else {
-                main.log(
-                  `User ${username} switching to ${avatarName}`,
-                  "info",
-                  "main_log",
-                );
-
-                enqueueSwitchStatus(username, avatarName);
-              }
-            }
-
-            const apiMatch = log.match(AVATAR_API_REGEX);
-            const assetBundleMatch = log.match(ASSET_BUNDLE_REGEX);
-            const avatarIdMatch = apiMatch || assetBundleMatch;
-
-            if (avatarIdMatch) {
-              const avatarId = avatarIdMatch[1];
-
-              const isNewAvatarId =
-                await avatar_id_store.checkAndMark(avatarId);
-              if (!isNewAvatarId) {
-                continue;
-              }
-
-              main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
-
-              enqueueLogAvatar(avatarId, "system_log");
-            }
-          }
-
-          lastReadPosition = newLastReadPosition;
-          // Still catching up on a backlog: skip the sleep and read the next chunk
-          hasMore =
-            lastReadPosition > prevPosition && lastReadPosition < stats.size;
-        } else if (stats.size < lastReadPosition) {
-          lastReadPosition = 0;
-        }
-      } else {
-        main.log(
-          "No log file selected. Waiting for a new log file...",
-          "info",
-          "main_log",
-        );
-      }
-
-      if (!hasMore) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+      const hasMore = await pollLogFile();
+      if (!hasMore) await sleep(1000);
     }
   } catch (error) {
     reportError(`Error stack of monitor of VRChat: ${error.message}`, true);
