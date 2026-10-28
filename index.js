@@ -227,8 +227,10 @@ function handleDestination(destMatch) {
   const { worldId, instanceId, tags } = parseDestination(destMatch);
   const instanceType = getInstanceType(tags);
 
+  const groupInfo = typeof tags.group === "string" ? `, ${tags.group}` : "";
+
   main.log(
-    `Destination set: ${worldId} instance ${instanceId} (${instanceType}, region ${tags.region || "?"})`,
+    `Destination set: ${worldId} instance ${instanceId} (${instanceType}${groupInfo}, region ${tags.region || "?"})`,
     "info",
     "main_log",
   );
