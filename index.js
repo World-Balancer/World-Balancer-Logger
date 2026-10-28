@@ -114,31 +114,37 @@ const BLACKLIST_REFRESH_MS = 5 * 60 * 1000; // re-download every 5 minutes
 const BLACKLIST_FETCH_TIMEOUT_MS = 10 * 1000;
 const blacklistCachePath = path.join(configDir, "blacklist-cache.json");
 
-let blockedWorlds = new Set();
-let blockedGroups = new Set();
+// id -> the full blacklist entry ({ id, name, comment, ... }), so we can tell
+// the user WHY an instance is blocked
+let blockedWorlds = new Map();
+let blockedGroups = new Map();
 let blacklistEtag = null; // ETag of the last blacklist we downloaded successfully
 
 // What instance the player is currently in, and whether it is blocked
 let currentWorldId = null;
 let currentGroupId = null;
 let isBlocked = false;
+let blockedKey = null; // e.g. "group:grp_..." so we notice a change of blocked instance
 
 /**
- * File format: { "world": [ { "id": "wrld_..." }, ... ],
- *                "group": [ { "id": "grp_..." }, ... ] }
+ * File format: { "world": [ { "id": "wrld_...", "name": "...", "comment": "..." }, ... ],
+ *                "group": [ { "id": "grp_...",  "name": "...", "comment": "..." }, ... ] }
+ * An optional "reason" field is shown to the user instead of "comment".
  * Plain strings are accepted in the arrays as well.
  */
 function applyBlacklistData(data) {
-  const toSet = (list) =>
-    new Set(
-      (Array.isArray(list) ? list : [])
-        .map((entry) => (typeof entry === "string" ? entry : entry?.id))
-        .filter((id) => typeof id === "string" && id.trim())
-        .map((id) => id.trim()),
-    );
+  const toMap = (list) => {
+    const map = new Map();
+    for (const entry of Array.isArray(list) ? list : []) {
+      const id = typeof entry === "string" ? entry : entry?.id;
+      if (typeof id !== "string" || !id.trim()) continue;
+      map.set(id.trim(), entry && typeof entry === "object" ? entry : {});
+    }
+    return map;
+  };
 
-  blockedWorlds = toSet(data?.world);
-  blockedGroups = toSet(data?.group);
+  blockedWorlds = toMap(data?.world);
+  blockedGroups = toMap(data?.group);
 }
 
 function loadBlacklistCache() {
@@ -159,32 +165,36 @@ function loadBlacklistCache() {
 }
 
 function updateBlockedState() {
-  const worldBlocked = Boolean(
-    currentWorldId && blockedWorlds.has(currentWorldId),
-  );
-  const groupBlocked = Boolean(
-    currentGroupId && blockedGroups.has(currentGroupId),
-  );
-  const nowBlocked = worldBlocked || groupBlocked;
+  let type = null;
+  let id = null;
+  let entry = null;
 
-  if (nowBlocked !== isBlocked) {
-    isBlocked = nowBlocked;
-    if (isBlocked) {
-      const what = worldBlocked
-        ? `world ${currentWorldId}`
-        : `group ${currentGroupId}`;
-      main.log(
-        `Blacklisted ${what}: not sending data while in this instance`,
-        "warn",
-        "main_log",
-      );
-    } else {
-      main.log(
-        "Left blacklisted instance: sending resumed",
-        "info",
-        "main_log",
-      );
-    }
+  if (currentWorldId && blockedWorlds.has(currentWorldId)) {
+    type = "world";
+    id = currentWorldId;
+    entry = blockedWorlds.get(id);
+  } else if (currentGroupId && blockedGroups.has(currentGroupId)) {
+    type = "group";
+    id = currentGroupId;
+    entry = blockedGroups.get(id);
+  }
+
+  const key = id ? `${type}:${id}` : null;
+  if (key === blockedKey) return; // nothing changed
+
+  blockedKey = key;
+  isBlocked = key !== null;
+
+  if (isBlocked) {
+    const name = entry?.name ? ` "${entry.name}"` : "";
+    const reason = entry?.reason || entry?.comment;
+    main.log(
+      `Blacklisted ${type}${name} (${id})${reason ? `: ${reason}` : ""}. Not sending data while in this instance.`,
+      "warn",
+      "main_log",
+    );
+  } else {
+    main.log("Left blacklisted instance: sending resumed", "info", "main_log");
   }
 }
 
