@@ -358,17 +358,21 @@ async function worker() {
   }
 }
 
+// Returns true when the job will get exactly one onSuccess / onReject / onFail
+// callback (it was queued, or failed right away because the queue is full).
+// Returns false when it was ignored (invalid, or the same avatar is already
+// waiting in the queue): no callback will ever fire for it.
 function enqueueAvatar(job) {
-  if (!job || typeof job !== "object") return;
+  if (!job || typeof job !== "object") return false;
   if (
     !job.avatarId ||
     typeof job.avatarId !== "string" ||
     !isValidAvtrId(job.avatarId)
   )
-    return;
-  if (!job.userid || typeof job.userid !== "string") return;
+    return false;
+  if (!job.userid || typeof job.userid !== "string") return false;
 
-  if (queuedSet.has(job.avatarId)) return;
+  if (queuedSet.has(job.avatarId)) return false;
 
   if (queue.length >= MAX_QUEUE_SIZE) {
     reportError(
@@ -376,7 +380,7 @@ function enqueueAvatar(job) {
       true,
     );
     failJob(job, "queue full"); // lets the caller unmark it so it can be retried
-    return;
+    return true;
   }
 
   queuedSet.add(job.avatarId);
@@ -386,6 +390,7 @@ function enqueueAvatar(job) {
     workerStarting = true;
     worker();
   }
+  return true;
 }
 
 // Config values may be stored as JSON text (e.g. "\"1234\""); keep it a string.
@@ -421,6 +426,15 @@ function normalizeDiscordId(raw) {
   return value !== "" ? value : null;
 }
 
+/**
+ * Queues an avatar ID found in the log.
+ * Resolves, never rejects, once the job has settled:
+ *   "success" - the server accepted it (the ID is now saved to disk)
+ *   "reject"  - the server refused it on its own
+ *   "fail"    - it could not be delivered (the ID was unmarked for a retry)
+ *   "ignored" - it was invalid or already waiting in the queue
+ * The caller can use this to know when the event is no longer in flight.
+ */
 async function enqueueLogAvatar(avatarId) {
   let discordId = "system_log";
 
@@ -434,30 +448,43 @@ async function enqueueLogAvatar(avatarId) {
     );
   }
 
-  enqueueAvatar({
-    avatarId,
-    userid: discordId,
-    onSuccess: (id) => {
-      logToMain(`[LogSync] Synced extracted ID: ${id}`);
-      // Only now is the ID saved to disk; until then a quit/crash just means
-      // it gets sent again after restart.
-      avatar_id_store.confirm(id);
-    },
-    onReject: (id, err) => {
-      // Refused by the server on its own: keep it marked for this session so
-      // it is not re-sent on every sighting. It is never saved to disk
-      // (unconfirmed), so it gets one fresh attempt after a restart.
-      logToMain(`[LogSync] Server rejected ${id}: ${err}`, "warn");
-    },
-    onFail: (id, err) => {
-      logToMain(`[LogSync] Sync error on ${id}: ${err}`, "warn");
-      // Forget the ID so the next time it appears in the log it is sent again.
-      avatar_id_store
-        .unmark(id)
-        .catch((e) =>
-          reportError(`[LogSync] unmark failed for ${id}: ${e.message}`),
-        );
-    },
+  return new Promise((resolve) => {
+    const handled = enqueueAvatar({
+      avatarId,
+      userid: discordId,
+      onSuccess: (id) => {
+        try {
+          logToMain(`[LogSync] Synced extracted ID: ${id}`);
+          // Only now is the ID saved to disk; until then a quit/crash just
+          // means it gets sent again after restart.
+          avatar_id_store.confirm(id);
+        } finally {
+          resolve("success");
+        }
+      },
+      onReject: (id, err) => {
+        try {
+          // Refused by the server on its own: keep it marked for this session
+          // so it is not re-sent on every sighting. It is never saved to disk
+          // (unconfirmed), so it gets one fresh attempt after a restart.
+          logToMain(`[LogSync] Server rejected ${id}: ${err}`, "warn");
+        } finally {
+          resolve("reject");
+        }
+      },
+      onFail: (id, err) => {
+        logToMain(`[LogSync] Sync error on ${id}: ${err}`, "warn");
+        // Forget the ID so the next time it appears in the log it is sent again.
+        Promise.resolve()
+          .then(() => avatar_id_store.unmark(id))
+          .catch((e) =>
+            reportError(`[LogSync] unmark failed for ${id}: ${e.message}`),
+          )
+          .finally(() => resolve("fail"));
+      },
+    });
+
+    if (!handled) resolve("ignored");
   });
 }
 

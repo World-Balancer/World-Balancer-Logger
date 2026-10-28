@@ -101,6 +101,8 @@ function normalizeDiscordId(raw) {
  * Handles fetching discordId and sending the switch status to your API endpoint
  * @param {string} username
  * @param {string} avatarName
+ * @returns {Promise<boolean>} resolves (never rejects) once the request has
+ *   finished: true if the server accepted it, false if it failed
  */
 async function enqueueSwitchStatus(username, avatarName) {
   try {
@@ -122,12 +124,14 @@ async function enqueueSwitchStatus(username, avatarName) {
       "info",
       "main_log",
     );
+    return true;
   } catch (apiErr) {
     let errorMsg = `enqueueSwitchStatus failed for ${username}: ${apiErr.message}`;
     if (apiErr.response) {
       errorMsg += ` | Status: ${apiErr.response.status} - ${JSON.stringify(apiErr.response.data)}`;
     }
     reportError(errorMsg, true);
+    return false;
   }
 }
 

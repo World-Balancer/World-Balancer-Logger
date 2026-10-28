@@ -329,19 +329,63 @@ function loadCursor() {
   }
 }
 
-async function saveCursor() {
-  try {
-    await fs.promises.writeFile(
-      cursorPath,
-      JSON.stringify({
-        file: currentLogFile,
-        id: currentFileId,
-        position: lastReadPosition,
-      }),
-    );
-  } catch (err) {
-    reportError(`Failed saving log position: ${err.message}`);
+// Events that were read from the log but whose request has not finished yet.
+// Each remembers the file it came from and the byte offset where its line starts.
+const pendingDeliveries = new Map();
+let nextDeliveryId = 0;
+
+/**
+ * The position that is safe to resume from after a restart: the start of the
+ * oldest event still in flight (it would otherwise be lost), or the read
+ * position when nothing is in flight.
+ */
+function resumePosition() {
+  let position = lastReadPosition;
+  for (const delivery of pendingDeliveries.values()) {
+    if (delivery.fileId === currentFileId && delivery.offset < position) {
+      position = delivery.offset;
+    }
   }
+  return position;
+}
+
+// Saves are queued one after another so an older write can never land last.
+let cursorSaveChain = Promise.resolve();
+
+function saveCursor() {
+  cursorSaveChain = cursorSaveChain.then(async () => {
+    try {
+      await fs.promises.writeFile(
+        cursorPath,
+        JSON.stringify({
+          file: currentLogFile,
+          id: currentFileId,
+          position: resumePosition(),
+        }),
+      );
+    } catch (err) {
+      reportError(`Failed saving log position: ${err.message}`);
+    }
+  });
+  return cursorSaveChain;
+}
+
+/**
+ * Remembers that the event on the line at `offset` is in flight until its
+ * request settles, and holds the saved position back behind it meanwhile.
+ * A request that ends the app first is then replayed on the next start
+ * (avatar IDs already confirmed on disk are skipped by avatar_id_store).
+ */
+function trackDelivery(offset, delivery) {
+  const id = nextDeliveryId++;
+  pendingDeliveries.set(id, { fileId: currentFileId, offset });
+
+  Promise.resolve(delivery)
+    .catch((err) => reportError(`Delivery failed: ${err.message}`))
+    .finally(() => {
+      pendingDeliveries.delete(id);
+      saveCursor(); // the position may be able to move forward now
+    });
 }
 
 /**
@@ -506,9 +550,10 @@ async function checkForNewFiles() {
 
 /**
  * Reads up to READ_CHUNK_BYTES of new data and only consumes whole lines.
- * Returns [completeLines, newLastReadPosition]. The position always lands
- * right after a newline (or after discarded bytes of an oversized line), so
- * no partial-line buffer is needed.
+ * Returns [lines, newLastReadPosition], where each line is
+ * { text, offset } and offset is the byte position where the line starts.
+ * The position always lands right after a newline (or after discarded bytes
+ * of an oversized line), so no partial-line buffer is needed.
  */
 async function readNewLogs(fileSize) {
   const bytesAvailable = fileSize - lastReadPosition;
@@ -554,15 +599,30 @@ async function readNewLogs(fileSize) {
     return [[], lastReadPosition + start];
   }
 
-  const text = data.toString("utf8", start, lastNewline);
-  // VRChat logs on Windows use \r\n; strip the \r so it never ends up in a match
-  return [text.split(/\r?\n/), lastReadPosition + lastNewline + 1];
+  const lines = [];
+  let lineStart = start;
+  while (lineStart <= lastNewline) {
+    const newline = data.indexOf(0x0a, lineStart);
+    // VRChat logs on Windows use \r\n; strip the \r so it never ends up in a match
+    const lineEnd =
+      newline > lineStart && data[newline - 1] === 0x0d ? newline - 1 : newline;
+
+    if (lineEnd > lineStart) {
+      lines.push({
+        text: data.toString("utf8", lineStart, lineEnd),
+        offset: lastReadPosition + lineStart,
+      });
+    }
+    lineStart = newline + 1;
+  }
+
+  return [lines, lastReadPosition + lastNewline + 1];
 }
 
 /**
  * Handles a "Switching <user> to avatar <name>" line.
  */
-function processSwitchLine(log) {
+function processSwitchLine(log, offset) {
   const switchMatch = log.match(SWITCH_REGEX);
   if (!switchMatch) return;
 
@@ -576,13 +636,13 @@ function processSwitchLine(log) {
   }
 
   main.log(`User ${username} switching to ${avatarName}`, "info", "main_log");
-  enqueueSwitchStatus(username, avatarName);
+  trackDelivery(offset, enqueueSwitchStatus(username, avatarName));
 }
 
 /**
  * Handles lines that contain an avatar ID (API URL or asset bundle download).
  */
-async function processAvatarLine(log) {
+async function processAvatarLine(log, offset) {
   const avatarIdMatch =
     log.match(AVATAR_API_REGEX) || log.match(ASSET_BUNDLE_REGEX);
   if (!avatarIdMatch) return;
@@ -592,17 +652,26 @@ async function processAvatarLine(log) {
   const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
   if (!isNewAvatarId) return;
 
-  // A blacklist refresh may have blocked this instance while we were waiting
-  if (isBlocked) return;
+  // A blacklist refresh may have blocked this instance while we were waiting.
+  // The ID was just marked as seen, so release it: it must still be sent if
+  // the player meets it again in an allowed instance.
+  if (isBlocked) {
+    try {
+      await avatar_id_store.unmark(avatarId);
+    } catch (err) {
+      reportError(`unmark failed for ${avatarId}: ${err.message}`);
+    }
+    return;
+  }
 
   main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
-  enqueueLogAvatar(avatarId, "system_log");
+  trackDelivery(offset, enqueueLogAvatar(avatarId, "system_log"));
 }
 
 /**
  * Routes one log line to the right handler.
  */
-async function processLogLine(log) {
+async function processLogLine(log, offset) {
   // Destination lines are always processed: they decide whether
   // the instance the player is in is blacklisted.
   const destMatch = log.match(DESTINATION_REGEX);
@@ -619,8 +688,8 @@ async function processLogLine(log) {
   // later if the player sees them in an allowed instance.)
   if (isBlocked) return;
 
-  processSwitchLine(log);
-  await processAvatarLine(log);
+  processSwitchLine(log, offset);
+  await processAvatarLine(log, offset);
 }
 
 /**
@@ -631,8 +700,8 @@ async function readAndProcessNewLogs(fileSize) {
   const prevPosition = lastReadPosition;
   const [newLogs, newLastReadPosition] = await readNewLogs(fileSize);
 
-  for (const log of newLogs) {
-    if (log) await processLogLine(log);
+  for (const { text, offset } of newLogs) {
+    await processLogLine(text, offset);
   }
 
   lastReadPosition = newLastReadPosition;
