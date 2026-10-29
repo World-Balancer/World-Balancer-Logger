@@ -105,6 +105,10 @@ let currentFileId = null; // identity of currentLogFile, to notice a replaced fi
 let lastReadPosition = 0;
 let isFirstFileSelection = true;
 let discardingOversizedLine = false; // inside a line longer than a whole chunk
+// Hex of the bytes just before lastReadPosition. If they change, the file was
+// rewritten under the same identity (truncated and regrown between two polls).
+// null = not known (could not be read); it is learned again on the next poll.
+let lastAnchor = "";
 
 function reportError(message, emitToMain = false) {
   log_error.writeErrorToFile(message);
@@ -212,23 +216,38 @@ function loadBlacklistCache() {
   }
 }
 
-function updateBlockedState() {
-  let type = null;
-  let id = null;
-  let entry = null;
-
-  const worldKey = currentWorldId?.toLowerCase();
-  const groupKey = currentGroupId?.toLowerCase();
+/**
+ * The blacklist entry that blocks an instance, or null. Used both for the
+ * instance the player is in now and, when a request is about to be sent or
+ * retried, for the instance the event came from.
+ */
+function findBlock(worldId, groupId) {
+  const worldKey = worldId?.toLowerCase();
+  const groupKey = groupId?.toLowerCase();
 
   if (worldKey && blockedWorlds.has(worldKey)) {
-    type = "world";
-    id = currentWorldId;
-    entry = blockedWorlds.get(worldKey);
-  } else if (groupKey && blockedGroups.has(groupKey)) {
-    type = "group";
-    id = currentGroupId;
-    entry = blockedGroups.get(groupKey);
+    return { type: "world", id: worldId, entry: blockedWorlds.get(worldKey) };
   }
+  if (groupKey && blockedGroups.has(groupKey)) {
+    return { type: "group", id: groupId, entry: blockedGroups.get(groupKey) };
+  }
+  return null;
+}
+
+/**
+ * Asked by the request queues right before a request is dispatched and before
+ * every retry. Re-reads the CURRENT blacklist, so a refresh that blocks the
+ * instance cancels requests that were already queued or waiting to retry.
+ */
+function canSendFor(ctx) {
+  return () => blacklistLoaded && !findBlock(ctx.worldId, ctx.groupId);
+}
+
+function updateBlockedState() {
+  const block = findBlock(currentWorldId, currentGroupId);
+  const type = block?.type ?? null;
+  const id = block?.id ?? null;
+  const entry = block?.entry ?? null;
 
   const key = id ? `${type}:${id}` : null;
   if (key === blockedKey) return; // nothing changed
@@ -356,24 +375,80 @@ function loadCursor() {
   }
 }
 
-// Events that were read from the log but whose request has not finished yet.
-// Each remembers the file it came from and the byte offset where its line starts.
+// Events that were read from the log but are not finished yet. Each one
+// remembers the file it came from, the byte offset where its line starts and
+// the instance (world/group) it happened in. They are saved together with the
+// log position, so after a restart every unfinished event is read again from
+// its own line (replayRestoredDeliveries), whichever log file it was in and
+// wherever the saved position has moved to since.
+const MAX_PERSISTED_DELIVERIES = 1000;
+const MAX_REPLAYS = 5; // restarts an event may be replayed across
+const MAX_REPLAY_ERRORS = 5; // failed replay attempts before it is given up
+const MAX_REPLAY_LINE_BYTES = 1024 * 1024;
 const pendingDeliveries = new Map();
 let nextDeliveryId = 0;
 
-/**
- * The position that is safe to resume from after a restart: the start of the
- * oldest event still in flight (it would otherwise be lost), or the read
- * position when nothing is in flight.
- */
-function resumePosition() {
-  let position = lastReadPosition;
-  for (const delivery of pendingDeliveries.values()) {
-    if (delivery.fileId === currentFileId && delivery.offset < position) {
-      position = delivery.offset;
-    }
+function restoreDelivery(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (typeof raw.file !== "string" || typeof raw.fileId !== "string") {
+    return null;
   }
-  return position;
+  if (!Number.isInteger(raw.offset) || raw.offset < 0) return null;
+  if (raw.kind !== "avatar" && raw.kind !== "switch") return null;
+
+  const replays = Number.isInteger(raw.replays) ? raw.replays : 0;
+  if (replays >= MAX_REPLAYS) return null;
+
+  return {
+    file: raw.file,
+    fileId: raw.fileId,
+    offset: raw.offset,
+    kind: raw.kind,
+    worldId: typeof raw.worldId === "string" ? raw.worldId : null,
+    groupId: typeof raw.groupId === "string" ? raw.groupId : null,
+    status: raw.status === "rejected" ? "rejected" : "inflight",
+    replays,
+    rejectRetried: raw.rejectRetried === true,
+    restored: true, // not replayed yet in this run
+    replayErrors: 0,
+  };
+}
+
+function restorePendingDeliveries(saved) {
+  if (!saved || !Array.isArray(saved.pending)) return;
+
+  for (const raw of saved.pending.slice(-MAX_PERSISTED_DELIVERIES)) {
+    const entry = restoreDelivery(raw);
+    if (!entry) continue;
+
+    // Still ahead of the saved position in the same file: reading on from the
+    // saved position meets this line again, so replaying it would be a copy.
+    if (
+      entry.file === saved.file &&
+      entry.fileId === saved.id &&
+      Number.isInteger(saved.position) &&
+      entry.offset >= saved.position
+    ) {
+      continue;
+    }
+    pendingDeliveries.set(nextDeliveryId++, entry);
+  }
+}
+
+restorePendingDeliveries(loadCursor());
+
+function serializeDeliveries() {
+  return [...pendingDeliveries.values()].map((e) => ({
+    file: e.file,
+    fileId: e.fileId,
+    offset: e.offset,
+    kind: e.kind,
+    worldId: e.worldId ?? null,
+    groupId: e.groupId ?? null,
+    status: e.status,
+    replays: e.replays ?? 0,
+    rejectRetried: e.rejectRetried === true,
+  }));
 }
 
 // Saves are queued one after another so an older write can never land last.
@@ -384,13 +459,18 @@ function saveCursor() {
     try {
       // Write a temp file, then rename it over the real one: a crash in the
       // middle can never leave a half-written (unreadable) position behind.
+      // Position, oversized-line state and anchor are read together here, so
+      // they always describe the same moment.
       const tempPath = `${cursorPath}.tmp`;
       await fs.promises.writeFile(
         tempPath,
         JSON.stringify({
           file: currentLogFile,
           id: currentFileId,
-          position: resumePosition(),
+          position: lastReadPosition,
+          discarding: discardingOversizedLine,
+          anchor: typeof lastAnchor === "string" ? lastAnchor : undefined,
+          pending: serializeDeliveries(),
         }),
       );
       await fs.promises.rename(tempPath, cursorPath);
@@ -405,15 +485,17 @@ const DELIVERY_RETRY_MIN_MS = 30 * 1000;
 const DELIVERY_RETRY_MAX_MS = 5 * 60 * 1000;
 
 /**
- * Delivers an avatar ID and resolves once it is no longer outstanding: the
- * server accepted it, refused it on its own, or a later sighting took over.
- * A delivery that fails even after the queue's own retries (server down, no
- * network) is tried again with a growing pause, so the event stays pending,
- * and the saved position stays behind it, until it has really been delivered.
+ * Delivers an avatar ID and resolves once it is no longer outstanding in this
+ * session: "success", "reject" (the server refused it on its own), "blocked"
+ * (its instance was blacklisted before it was sent), "superseded" (a later
+ * sighting took over) or "ignored". A delivery that fails even after the
+ * queue's own retries (server down, no network) is tried again with a growing
+ * pause, and stays pending until it has really been delivered.
+ * `canSend` is rechecked before every dispatch and retry.
  */
-async function deliverAvatar(avatarId) {
+async function deliverAvatar(avatarId, canSend) {
   let pause = DELIVERY_RETRY_MIN_MS;
-  let outcome = await enqueueLogAvatar(avatarId, "system_log");
+  let outcome = await enqueueLogAvatar(avatarId, { canSend });
 
   while (outcome === "fail" || outcome === "unsaved") {
     await sleep(pause);
@@ -431,50 +513,166 @@ async function deliverAvatar(avatarId) {
       }
     }
 
+    // The instance may have been blacklisted while we waited. The failure
+    // already unmarked the ID, so nothing needs to be released.
+    if (!canSend()) return "blocked";
+
     // The failure unmarked the ID. Mark it again for the retry; if that says
     // it is already marked, a later sighting of the same ID is handling it.
     if (!(await avatar_id_store.checkAndMark(avatarId))) return "superseded";
-    outcome = await enqueueLogAvatar(avatarId, "system_log");
+    outcome = await enqueueLogAvatar(avatarId, { canSend });
   }
 
   return outcome;
 }
 
+// username -> number of its newest switch delivery. A retry of an older status
+// is dropped once a newer one exists, so it can never overwrite it.
+const latestSwitchByUser = new Map();
+let switchCounter = 0;
+
 /**
- * Remembers that the event on the line at `offset` is in flight until its
- * request settles, and holds the saved position back behind it meanwhile.
- * A request that ends the app first is then replayed on the next start
- * (avatar IDs already confirmed on disk are skipped by avatar_id_store).
+ * Delivers a switch status and resolves with "success", "blocked" or
+ * "superseded". A failed request is retried with a growing pause and the event
+ * stays pending until it has really been delivered.
  */
-function trackDelivery(offset, delivery) {
-  const id = nextDeliveryId++;
-  pendingDeliveries.set(id, { fileId: currentFileId, offset });
+async function deliverSwitch(username, avatarName, canSend) {
+  const mine = ++switchCounter;
+  latestSwitchByUser.set(username, mine);
+
+  try {
+    let pause = DELIVERY_RETRY_MIN_MS;
+    let outcome = await enqueueSwitchStatus(username, avatarName, { canSend });
+
+    while (outcome === "fail") {
+      await sleep(pause);
+      pause = Math.min(pause * 2, DELIVERY_RETRY_MAX_MS);
+
+      if (latestSwitchByUser.get(username) !== mine) return "superseded";
+      outcome = await enqueueSwitchStatus(username, avatarName, { canSend });
+    }
+    return outcome;
+  } finally {
+    if (latestSwitchByUser.get(username) === mine) {
+      latestSwitchByUser.delete(username);
+    }
+  }
+}
+
+/**
+ * Remembers an event until its request is really finished, and saves it with
+ * the log position meanwhile. Settled outcomes remove it. A request the server
+ * refused on its own stays saved (once) so it is tried again after a restart,
+ * and so does one whose delivery threw: unsuccessful outcomes are never
+ * dropped just because the promise finished.
+ */
+function trackDelivery(entry, delivery) {
+  const key = nextDeliveryId++;
+  pendingDeliveries.set(key, entry);
 
   Promise.resolve(delivery)
-    .catch((err) => reportError(`Delivery failed: ${err.message}`))
-    .finally(() => {
-      pendingDeliveries.delete(id);
-      saveCursor(); // the position may be able to move forward now
-    });
+    .then((outcome) => {
+      if (outcome === "reject" && !entry.rejectRetried) {
+        entry.status = "rejected";
+        return;
+      }
+      pendingDeliveries.delete(key);
+    })
+    .catch((err) =>
+      reportError(
+        `Delivery failed (kept, replayed after a restart): ${err.message}`,
+      ),
+    )
+    .finally(() => saveCursor());
+}
+
+const ANCHOR_BYTES = 64;
+
+/**
+ * The bytes just before `position`, as hex ("" at the very start).
+ */
+async function readAnchor(file, position) {
+  if (position <= 0) return "";
+
+  const length = Math.min(position, ANCHOR_BYTES);
+  const buffer = Buffer.allocUnsafe(length);
+  const handle = await fs.promises.open(file, "r");
+  try {
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      length,
+      position - length,
+    );
+    return buffer.subarray(0, bytesRead).toString("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Reads the line that starts at `offset`. Resolves to null when it cannot be
+ * found any more (file gone or replaced, line not complete or too long).
+ */
+async function readLineAt(file, fileId, offset) {
+  let stats;
+  try {
+    stats = await fs.promises.stat(file);
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+  if (fileIdentity(stats) !== fileId || offset >= stats.size) return null;
+
+  const length = Math.min(MAX_REPLAY_LINE_BYTES, stats.size - offset);
+  const buffer = Buffer.allocUnsafe(length);
+  const handle = await fs.promises.open(file, "r");
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    const data = buffer.subarray(0, bytesRead);
+    const newline = data.indexOf(0x0a);
+    if (newline === -1) return null;
+    const end =
+      newline > 0 && data[newline - 1] === 0x0d ? newline - 1 : newline;
+    return data.toString("utf8", 0, end);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
  * Moves a byte offset back to the start of the line it falls in, so a line
- * that is only partly written is read again once it is complete.
+ * that is only partly written is read again once it is complete. Scans back
+ * as far as one read chunk, however long the partial line is. Resolves to
+ * { position, discarding }: when even that far back there is no newline, the
+ * line is longer than a chunk (readNewLogs would skip it), so the position is
+ * kept and the rest of the line is flagged to be discarded.
  */
 async function alignToLineStart(file, offset) {
-  if (offset === 0) return 0;
+  if (offset === 0) return { position: 0, discarding: false };
 
-  const length = Math.min(offset, 64 * 1024);
-  const buffer = Buffer.allocUnsafe(length);
+  const BLOCK = 64 * 1024;
+  const floor = Math.max(0, offset - READ_CHUNK_BYTES);
   const handle = await fs.promises.open(file, "r");
   try {
-    const { bytesRead } = await handle.read(buffer, 0, length, offset - length);
-    const newline = buffer.lastIndexOf(0x0a, bytesRead - 1);
-    return newline === -1 ? offset : offset - bytesRead + newline + 1;
+    let end = offset;
+    while (end > floor) {
+      const start = Math.max(floor, end - BLOCK);
+      const buffer = Buffer.allocUnsafe(end - start);
+      const { bytesRead } = await handle.read(buffer, 0, end - start, start);
+      const newline =
+        bytesRead > 0 ? buffer.lastIndexOf(0x0a, bytesRead - 1) : -1;
+      if (newline !== -1)
+        return { position: start + newline + 1, discarding: false };
+      end = start;
+    }
   } finally {
     await handle.close();
   }
+
+  // No newline all the way back to the start of the file: that is line one
+  if (floor === 0) return { position: 0, discarding: false };
+  return { position: offset, discarding: true };
 }
 
 function lastDestinationIn(buffer) {
@@ -538,10 +736,12 @@ async function findLastDestination(file, endPos) {
 
 /**
  * Where to start reading a log file we have just selected.
+ * Resolves to { position, discarding } (discarding: the position is inside a
+ * line that is longer than a chunk and is being skipped).
  */
 async function resolveStartPosition(file, stats, isStartup) {
   // A log VRChat creates while we run: read it all
-  if (!isStartup) return 0;
+  if (!isStartup) return { position: 0, discarding: false };
 
   // Resume where the previous run stopped, if it is still the same file
   const saved = loadCursor();
@@ -552,13 +752,22 @@ async function resolveStartPosition(file, stats, isStartup) {
     Number.isInteger(saved.position) &&
     saved.position <= stats.size
   ) {
-    return saved.position;
+    // The bytes before the position must still be the ones we saw: if not,
+    // the file was rewritten under the same identity.
+    const anchor = await readAnchor(file, saved.position);
+    if (typeof saved.anchor !== "string" || saved.anchor === anchor) {
+      return {
+        position: saved.position,
+        discarding: saved.discarding === true,
+      };
+    }
   }
 
   // VRChat started after us: nothing in this file is old
-  if (stats.birthtimeMs >= APP_START_MS) return 0;
+  if (stats.birthtimeMs >= APP_START_MS)
+    return { position: 0, discarding: false };
 
-  if (!SKIP_BACKLOG_ON_STARTUP) return 0;
+  if (!SKIP_BACKLOG_ON_STARTUP) return { position: 0, discarding: false };
   return alignToLineStart(file, stats.size);
 }
 
@@ -568,24 +777,28 @@ async function resolveStartPosition(file, stats, isStartup) {
  */
 async function selectLogFile(latestLogFile) {
   const stats = await fs.promises.stat(latestLogFile);
-  const position = await resolveStartPosition(
+  const { position, discarding } = await resolveStartPosition(
     latestLogFile,
     stats,
     isFirstFileSelection,
   );
   const lastDestination =
     position > 0 ? await findLastDestination(latestLogFile, position) : null;
+  const anchor = await readAnchor(latestLogFile, position);
 
   currentLogFile = latestLogFile;
   currentFileId = fileIdentity(stats);
   lastReadPosition = position;
-  discardingOversizedLine = false;
+  discardingOversizedLine = discarding;
+  lastAnchor = anchor;
   isFirstFileSelection = false;
 
   // New log = new VRChat session: forget the previous instance
   resetInstanceState();
   if (lastDestination) handleDestination(lastDestination);
 
+  // Events still in flight from the previous log file stay in
+  // pendingDeliveries, so this save keeps them.
   await saveCursor();
   main.log(`Switching to new log file: ${currentLogFile}`, "info", "main_log");
 }
@@ -620,14 +833,24 @@ async function checkForNewFiles() {
 
 /**
  * Reads up to READ_CHUNK_BYTES of new data and only consumes whole lines.
- * Returns [lines, newLastReadPosition], where each line is
- * { text, offset } and offset is the byte position where the line starts.
+ * Returns { lines, position, discarding }: each line is { text, offset, end }
+ * (offset = where the line starts, end = just after its newline), position is
+ * where reading continues and discarding says whether that position is inside
+ * an oversized line that is being skipped. Nothing is changed here: the
+ * caller applies position and discarding together, so a saved cursor can
+ * never hold one without the other.
  * The position always lands right after a newline (or after discarded bytes
  * of an oversized line), so no partial-line buffer is needed.
  */
 async function readNewLogs(fileSize) {
+  const unchanged = {
+    lines: [],
+    position: lastReadPosition,
+    discarding: discardingOversizedLine,
+  };
+
   const bytesAvailable = fileSize - lastReadPosition;
-  if (bytesAvailable <= 0) return [[], lastReadPosition];
+  if (bytesAvailable <= 0) return unchanged;
 
   const toRead = Math.min(bytesAvailable, READ_CHUNK_BYTES);
   const buffer = Buffer.allocUnsafe(toRead);
@@ -640,15 +863,20 @@ async function readNewLogs(fileSize) {
     await handle.close();
   }
 
-  if (bytesRead === 0) return [[], lastReadPosition];
+  if (bytesRead === 0) return unchanged;
   const data = buffer.subarray(0, bytesRead);
 
   // Inside an oversized line: throw bytes away until its newline is reached
   let start = 0;
   if (discardingOversizedLine) {
     const newline = data.indexOf(0x0a);
-    if (newline === -1) return [[], lastReadPosition + bytesRead];
-    discardingOversizedLine = false;
+    if (newline === -1) {
+      return {
+        lines: [],
+        position: lastReadPosition + bytesRead,
+        discarding: true,
+      };
+    }
     start = newline + 1;
   }
 
@@ -662,11 +890,14 @@ async function readNewLogs(fileSize) {
         `Skipped a log line longer than ${READ_CHUNK_BYTES} bytes.`,
         true,
       );
-      discardingOversizedLine = true;
-      return [[], lastReadPosition + bytesRead];
+      return {
+        lines: [],
+        position: lastReadPosition + bytesRead,
+        discarding: true,
+      };
     }
     // Incomplete last line; wait for more data.
-    return [[], lastReadPosition + start];
+    return { lines: [], position: lastReadPosition + start, discarding: false };
   }
 
   const lines = [];
@@ -681,18 +912,38 @@ async function readNewLogs(fileSize) {
       lines.push({
         text: data.toString("utf8", lineStart, lineEnd),
         offset: lastReadPosition + lineStart,
+        end: lastReadPosition + newline + 1,
       });
     }
     lineStart = newline + 1;
   }
 
-  return [lines, lastReadPosition + lastNewline + 1];
+  return {
+    lines,
+    position: lastReadPosition + lastNewline + 1,
+    discarding: false,
+  };
+}
+
+/**
+ * What is needed to deliver (and later replay) the event on one line.
+ */
+function eventContext(offset) {
+  return {
+    file: currentLogFile,
+    fileId: currentFileId,
+    offset,
+    worldId: currentWorldId,
+    groupId: currentGroupId,
+    replays: 0,
+    rejectRetried: false,
+  };
 }
 
 /**
  * Handles a "Switching <user> to avatar <name>" line.
  */
-function processSwitchLine(log, offset) {
+function processSwitchLine(log, ctx) {
   const switchMatch = log.match(SWITCH_REGEX);
   if (!switchMatch) return;
 
@@ -706,13 +957,18 @@ function processSwitchLine(log, offset) {
   }
 
   main.log(`User ${username} switching to ${avatarName}`, "info", "main_log");
-  trackDelivery(offset, enqueueSwitchStatus(username, avatarName));
+  trackDelivery(
+    { ...ctx, kind: "switch", status: "inflight" },
+    deliverSwitch(username, avatarName, canSendFor(ctx)),
+  );
 }
 
 /**
  * Handles lines that contain an avatar ID (API URL or asset bundle download).
+ * If the blacklist blocks the instance after the ID was marked, the request
+ * queue cancels the delivery before it is sent and releases the ID (canSend).
  */
-async function processAvatarLine(log, offset) {
+async function processAvatarLine(log, ctx) {
   const avatarIdMatch =
     log.match(AVATAR_API_REGEX) || log.match(ASSET_BUNDLE_REGEX);
   if (!avatarIdMatch) return;
@@ -722,20 +978,11 @@ async function processAvatarLine(log, offset) {
   const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
   if (!isNewAvatarId) return;
 
-  // A blacklist refresh may have blocked this instance while we were waiting.
-  // The ID was just marked as seen, so release it: it must still be sent if
-  // the player meets it again in an allowed instance.
-  if (isBlocked) {
-    try {
-      await avatar_id_store.unmark(avatarId);
-    } catch (err) {
-      reportError(`unmark failed for ${avatarId}: ${err.message}`);
-    }
-    return;
-  }
-
   main.log(`Found avatar ID: ${avatarId}`, "info", "main_log");
-  trackDelivery(offset, deliverAvatar(avatarId));
+  trackDelivery(
+    { ...ctx, kind: "avatar", status: "inflight" },
+    deliverAvatar(avatarId, canSendFor(ctx)),
+  );
 }
 
 /**
@@ -758,37 +1005,146 @@ async function processLogLine(log, offset) {
   // later if the player sees them in an allowed instance.)
   if (isBlocked) return;
 
-  processSwitchLine(log, offset);
-  await processAvatarLine(log, offset);
+  // The avatar handler is the only one that can fail (it reads the avatar ID
+  // store), so it goes first: if it throws, nothing was started for this line
+  // and the line can simply be read again without duplicating a request.
+  const ctx = eventContext(offset);
+  await processAvatarLine(log, ctx);
+  processSwitchLine(log, ctx);
+}
+
+/**
+ * Makes `position` the place reading continues from. The anchor is read
+ * before anything is assigned and everything is then set in one step.
+ */
+async function commitPosition(position, discarding) {
+  let anchor = null;
+  try {
+    anchor = await readAnchor(currentLogFile, position);
+  } catch (err) {
+    reportError(`Failed reading log anchor: ${err.message}`);
+  }
+
+  lastReadPosition = position;
+  discardingOversizedLine = discarding;
+  lastAnchor = anchor;
+  await saveCursor();
 }
 
 /**
  * Reads and processes one chunk of new log data.
  * Returns true if more data is waiting (so the caller can skip its sleep).
+ * If a line fails, the position is moved up to the last line that finished
+ * and the error is rethrown: the next poll starts at the failing line, so
+ * lines that already started a request are not processed again.
  */
 async function readAndProcessNewLogs(fileSize) {
   const prevPosition = lastReadPosition;
-  const [newLogs, newLastReadPosition] = await readNewLogs(fileSize);
+  const { lines, position, discarding } = await readNewLogs(fileSize);
 
-  for (const { text, offset } of newLogs) {
-    await processLogLine(text, offset);
+  let committed = prevPosition;
+  try {
+    for (const line of lines) {
+      await processLogLine(line.text, line.offset);
+      committed = line.end;
+    }
+  } catch (err) {
+    if (committed !== prevPosition) {
+      try {
+        await commitPosition(committed, false);
+      } catch (commitErr) {
+        reportError(`Failed saving partial progress: ${commitErr.message}`);
+      }
+    }
+    throw err;
   }
 
-  lastReadPosition = newLastReadPosition;
-  if (lastReadPosition !== prevPosition) await saveCursor();
+  if (position !== prevPosition || discarding !== discardingOversizedLine) {
+    await commitPosition(position, discarding);
+  }
 
   // Still catching up on a backlog: skip the sleep and read the next chunk
   return lastReadPosition > prevPosition && lastReadPosition < fileSize;
 }
 
 /**
- * The selected log file was replaced or truncated: start it over.
+ * The selected log file was replaced, truncated or rewritten: start it over.
  */
 async function restartLogFile(stats) {
   currentFileId = fileIdentity(stats);
   lastReadPosition = 0;
   discardingOversizedLine = false;
+  lastAnchor = "";
   resetInstanceState();
+  await saveCursor();
+}
+
+/**
+ * True if the bytes just before our position are no longer the ones we read:
+ * the file was truncated and grew past our position again between two polls
+ * (same identity, size no smaller than the position).
+ */
+async function wasRewritten() {
+  if (lastReadPosition === 0) return false;
+
+  const anchor = await readAnchor(currentLogFile, lastReadPosition);
+  if (lastAnchor === null) {
+    lastAnchor = anchor; // never verified: trust what is there now
+    return false;
+  }
+  return anchor !== lastAnchor;
+}
+
+/**
+ * Events that were unfinished when the app last stopped (and are behind the
+ * saved position, or in an older log file) are read again from their own
+ * lines and delivered. Runs once the blacklist is loaded, because every
+ * delivery is checked against it.
+ */
+async function replayDelivery(entry) {
+  // The instance the event came from is blacklisted now: drop it
+  if (findBlock(entry.worldId, entry.groupId)) return;
+
+  const text = await readLineAt(entry.file, entry.fileId, entry.offset);
+  if (text === null) return; // file gone or replaced: nothing to replay
+
+  const ctx = {
+    file: entry.file,
+    fileId: entry.fileId,
+    offset: entry.offset,
+    worldId: entry.worldId,
+    groupId: entry.groupId,
+    replays: entry.replays + 1,
+    rejectRetried: entry.rejectRetried || entry.status === "rejected",
+  };
+
+  main.log(
+    `Replaying an unfinished ${entry.kind} event from an earlier session`,
+    "info",
+    "main_log",
+  );
+  if (entry.kind === "avatar") await processAvatarLine(text, ctx);
+  else processSwitchLine(text, ctx);
+}
+
+async function replayRestoredDeliveries() {
+  const restored = [...pendingDeliveries.entries()].filter(
+    ([, entry]) => entry.restored,
+  );
+  if (restored.length === 0) return;
+
+  for (const [key, entry] of restored) {
+    try {
+      // The replay registers its own pending entry before this one is removed
+      await replayDelivery(entry);
+      pendingDeliveries.delete(key);
+    } catch (err) {
+      entry.replayErrors += 1;
+      reportError(`Replaying a saved event failed: ${err.message}`);
+      if (entry.replayErrors >= MAX_REPLAY_ERRORS)
+        pendingDeliveries.delete(key);
+    }
+  }
   await saveCursor();
 }
 
@@ -810,10 +1166,17 @@ async function pollLogFile() {
   // Nothing is read (so nothing is skipped) until a blacklist is available
   if (!blacklistLoaded) return false;
 
+  await replayRestoredDeliveries();
+
   const stats = await fs.promises.stat(currentLogFile);
 
-  // Replaced (even if it has already grown past our position) or truncated
-  if (fileIdentity(stats) !== currentFileId || stats.size < lastReadPosition) {
+  // Replaced (even if it has already grown past our position), truncated, or
+  // truncated and regrown past our position without changing identity
+  if (
+    fileIdentity(stats) !== currentFileId ||
+    stats.size < lastReadPosition ||
+    (await wasRewritten())
+  ) {
     await restartLogFile(stats);
     return false;
   }

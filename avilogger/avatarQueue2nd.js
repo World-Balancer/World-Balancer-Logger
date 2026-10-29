@@ -129,8 +129,26 @@ function isSafeToRetry(err) {
   return CONNECTION_ERROR_CODES.has(err?.code);
 }
 
-async function postSwitchStatus(payload) {
+// Thrown when canSend() says this request must not go out (for example the
+// instance it came from was blacklisted after the request was queued).
+class SendCancelledError extends Error {}
+
+// Fails closed: a canSend that throws counts as "do not send".
+function isSendAllowed(canSend) {
+  if (typeof canSend !== "function") return true;
+  try {
+    return Boolean(canSend());
+  } catch (err) {
+    reportError(`canSend check failed, not sending: ${err.message}`);
+    return false;
+  }
+}
+
+async function postSwitchStatus(payload, canSend) {
   for (let attempt = 0; ; attempt++) {
+    // Checked before the first dispatch and again before every retry
+    if (!isSendAllowed(canSend)) throw new SendCancelledError();
+
     try {
       return await axiosInstance.post(SWITCH_URL, payload);
     } catch (err) {
@@ -158,12 +176,18 @@ const lastRequestByUser = new Map(); // username -> promise of its latest reques
  * the same user has finished.
  * @param {string} username
  * @param {string} avatarName
- * @returns {Promise<boolean>} resolves (never rejects) once the request has
- *   finished: true if the server accepted it, false if it failed
+ * @param {{ canSend?: () => boolean }} [options] canSend is asked right before
+ *   the request is sent and before every retry; when it says no, nothing is
+ *   sent and the result is "blocked".
+ * @returns {Promise<"success"|"fail"|"blocked">} resolves (never rejects) once
+ *   the request has finished: "success" if the server accepted it, "fail" if
+ *   it could not be delivered, "blocked" if canSend cancelled it
  */
-function enqueueSwitchStatus(username, avatarName) {
+function enqueueSwitchStatus(username, avatarName, { canSend } = {}) {
   const previous = lastRequestByUser.get(username) || Promise.resolve();
-  const request = previous.then(() => sendSwitchStatus(username, avatarName));
+  const request = previous.then(() =>
+    sendSwitchStatus(username, avatarName, canSend),
+  );
 
   lastRequestByUser.set(username, request);
   request
@@ -182,9 +206,10 @@ function enqueueSwitchStatus(username, avatarName) {
  * Handles fetching discordId and sending the switch status to your API endpoint
  * @param {string} username
  * @param {string} avatarName
- * @returns {Promise<boolean>} never rejects
+ * @param {(() => boolean) | undefined} canSend
+ * @returns {Promise<"success"|"fail"|"blocked">} never rejects
  */
-async function sendSwitchStatus(username, avatarName) {
+async function sendSwitchStatus(username, avatarName, canSend) {
   try {
     const discordId = normalizeDiscordId(await getConfig("Userid.discord_id"));
 
@@ -194,21 +219,30 @@ async function sendSwitchStatus(username, avatarName) {
       ...(discordId && { discordId }),
     };
 
-    await postSwitchStatus(payload);
+    await postSwitchStatus(payload, canSend);
 
     main.log(
       `Successfully sent API update for ${username}`,
       "info",
       "main_log",
     );
-    return true;
+    return "success";
   } catch (apiErr) {
+    if (apiErr instanceof SendCancelledError) {
+      main.log(
+        `Switch update for ${username} cancelled: instance is blacklisted`,
+        "info",
+        "main_log",
+      );
+      return "blocked";
+    }
+
     let errorMsg = `enqueueSwitchStatus failed for ${username}: ${apiErr.message}`;
     if (apiErr.response) {
       errorMsg += ` | Status: ${apiErr.response.status} - ${JSON.stringify(apiErr.response.data)}`;
     }
     reportError(errorMsg, true);
-    return false;
+    return "fail";
   }
 }
 

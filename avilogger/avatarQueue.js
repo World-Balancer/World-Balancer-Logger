@@ -139,6 +139,41 @@ function rejectJob(job, reason) {
   }
 }
 
+// The job must not be sent any more (canSend said no, e.g. its instance was
+// blacklisted after it was queued). Nothing was sent for it.
+function cancelJob(job) {
+  if (job?.onCancel) {
+    try {
+      job.onCancel(job.avatarId);
+    } catch (cbErr) {
+      logToMain(cbErr.message, "warn");
+    }
+  }
+}
+
+// Fails closed: a canSend that throws counts as "do not send".
+function isJobSendable(job) {
+  if (typeof job?.canSend !== "function") return true;
+  try {
+    return Boolean(job.canSend());
+  } catch (err) {
+    reportError(
+      `[Batch] canSend check failed for ${job.avatarId}, not sending: ${err.message}`,
+    );
+    return false;
+  }
+}
+
+// Returns the jobs that may still be sent; the others are cancelled.
+function takeSendable(items) {
+  const sendable = [];
+  for (const job of items) {
+    if (isJobSendable(job)) sendable.push(job);
+    else cancelJob(job);
+  }
+  return sendable;
+}
+
 // Statuses where the server may be refusing the batch because of ONE member
 // (bad request / payload / unprocessable) while accepting the others.
 const MEMBER_REJECT_STATUSES = new Set([400, 413, 422]);
@@ -206,23 +241,34 @@ function isRetryable(err) {
   );
 }
 
-// POSTs the payload, retrying transient errors.
-// Returns { res } on success or { err } once retries are exhausted / not retryable.
-async function postWithRetries(payload, validCount, totalCount) {
+// POSTs the items, retrying transient errors. Before every attempt (the first
+// dispatch and each retry) the jobs are checked again with canSend, so a job
+// whose instance became blacklisted meanwhile is cancelled instead of sent.
+// Returns { res, items } on success, { err, items } once retries are
+// exhausted / not retryable, or { cancelled: true } when nothing is left to
+// send. `items` are the jobs that were actually in the last request.
+async function postWithRetries(items, totalCount) {
   let lastErr = null;
+  let sendable = items;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    sendable = takeSendable(sendable);
+    if (sendable.length === 0) return { cancelled: true };
+
     const retryLabel = attempt > 0 ? `(retry ${attempt}/${MAX_RETRIES})` : "";
     logToMain(
-      `[Batch] Sending ${validCount}/${totalCount} valid avatars ${retryLabel}`,
+      `[Batch] Sending ${sendable.length}/${totalCount} valid avatars ${retryLabel}`,
     );
 
     try {
-      return { res: await axiosInstance.post(API_URL, payload) };
+      return {
+        res: await axiosInstance.post(API_URL, buildPayload(sendable)),
+        items: sendable,
+      };
     } catch (err) {
       lastErr = err;
       reportError(
-        `[Batch] FAILED → ${validCount} avatars | code=${err.code} | status=${err.response?.status || "N/A"} | ${err.message}`,
+        `[Batch] FAILED → ${sendable.length} avatars | code=${err.code} | status=${err.response?.status || "N/A"} | ${err.message}`,
       );
 
       // 400/401/403/404...: retrying or splitting won't help
@@ -234,7 +280,7 @@ async function postWithRetries(payload, validCount, totalCount) {
     }
   }
 
-  return { err: lastErr };
+  return { err: lastErr, items: sendable };
 }
 
 function markBatchSucceeded(items, res) {
@@ -246,6 +292,11 @@ function markBatchSucceeded(items, res) {
 // Sends each item alone so one bad member can't sink the rest.
 async function sendIndividually(items) {
   for (const job of items) {
+    if (!isJobSendable(job)) {
+      cancelJob(job);
+      continue;
+    }
+
     try {
       await axiosInstance.post(API_URL, buildPayload([job]));
 
@@ -301,17 +352,20 @@ async function sendBatch(batch) {
     return;
   }
 
-  const { res, err } = await postWithRetries(
-    buildPayload(validItems),
-    validItems.length,
+  const { res, err, items, cancelled } = await postWithRetries(
+    validItems,
     batch.length,
   );
 
-  if (res) {
-    markBatchSucceeded(validItems, res);
+  if (cancelled) {
+    logToMain("[Batch] Every item was cancelled before sending.", "warn");
     return;
   }
-  await handleBatchFailure(validItems, err);
+  if (res) {
+    markBatchSucceeded(items, res);
+    return;
+  }
+  await handleBatchFailure(items, err);
 }
 
 async function worker() {
@@ -363,8 +417,12 @@ async function worker() {
   }
 }
 
+// A job may carry canSend(): it is asked right before the job is dispatched
+// and before every retry, and a job it refuses is cancelled (onCancel) instead
+// of sent.
 // Returns true when the job will get exactly one onSuccess / onReject / onFail
-// callback (it was queued, or failed right away because the queue is full).
+// / onCancel callback (it was queued, or failed right away because the queue
+// is full).
 // Returns false when it was ignored (invalid, or the same avatar is already
 // waiting in the queue): no callback will ever fire for it.
 function enqueueAvatar(job) {
@@ -457,13 +515,15 @@ function flushConfirmedIds() {
  *   "unsaved" - the server accepted it but saving the ID to disk failed
  *   "reject"  - the server refused it on its own
  *   "fail"    - it could not be delivered (the ID was unmarked for a retry)
+ *   "blocked" - options.canSend refused it before it was sent (the ID was
+ *               unmarked, so it is still sent if seen in an allowed place)
  *   "ignored" - it was invalid or already waiting in the queue
  * The caller can use this to know when the event is no longer in flight.
  * "success" is only reported after the ID is durable, so a caller that moves
  * its saved log position forward on it can never skip an ID that a crash
  * would then also have lost.
  */
-async function enqueueLogAvatar(avatarId) {
+async function enqueueLogAvatar(avatarId, { canSend } = {}) {
   let discordId = "system_log";
 
   try {
@@ -480,6 +540,18 @@ async function enqueueLogAvatar(avatarId) {
     const handled = enqueueAvatar({
       avatarId,
       userid: discordId,
+      canSend,
+      onCancel: (id) => {
+        logToMain(`[LogSync] Not sending ${id}: its instance is blacklisted`);
+        // Nothing was sent: forget the ID so it is sent if it is seen again
+        // in an allowed instance.
+        Promise.resolve()
+          .then(() => avatar_id_store.unmark(id))
+          .catch((e) =>
+            reportError(`[LogSync] unmark failed for ${id}: ${e.message}`),
+          )
+          .finally(() => resolve("blocked"));
+      },
       onSuccess: async (id) => {
         let outcome = "success";
         try {
