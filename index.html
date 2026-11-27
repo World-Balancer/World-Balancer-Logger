@@ -289,6 +289,17 @@ SOFTWARE.
                 <li class="nav-item">
                     <a
                         class="nav-link"
+                        id="avatars-tab"
+                        data-bs-toggle="tab"
+                        href="#avatars"
+                        role="tab"
+                    >
+                        <i class="bi bi-list-ul"></i> Avatars
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a
+                        class="nav-link"
                         id="settings-tab"
                         data-bs-toggle="tab"
                         href="#settings"
@@ -381,13 +392,66 @@ SOFTWARE.
                     </div>
                 </div>
 
+                <div class="tab-pane fade" id="avatars" role="tabpanel">
+                    <div class="p-3 bg-dark border rounded border-secondary">
+                        <div
+                            class="d-flex flex-wrap gap-2 align-items-center mb-2"
+                        >
+                            <input
+                                type="search"
+                                class="form-control form-control-dark flex-grow-1"
+                                id="avatarFilter"
+                                placeholder="Filter by avatar name, ID or player"
+                                autocomplete="off"
+                                style="max-width: 420px"
+                            />
+                            <span
+                                class="text-secondary"
+                                id="avatarCount"
+                            ></span>
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-outline-danger ms-auto"
+                                id="avatarClear"
+                            >
+                                Clear list
+                            </button>
+                        </div>
+                        <p class="text-secondary small">
+                            Every avatar ID found in your VRChat log, with its
+                            name. If the name shows as "Private", the avatar is
+                            private or no longer available. Press Report to send
+                            an avatar to the World Balancer team.
+                        </p>
+                        <div class="table-responsive">
+                            <table
+                                class="table table-dark table-sm align-middle mb-0"
+                            >
+                                <thead>
+                                    <tr>
+                                        <th>Avatar name</th>
+                                        <th>Avatar ID</th>
+                                        <th>Last seen</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="avatarRows"></tbody>
+                            </table>
+                        </div>
+                        <p
+                            id="avatarEmpty"
+                            class="text-secondary text-center my-3"
+                        ></p>
+                    </div>
+                </div>
+
                 <div class="tab-pane fade" id="report" role="tabpanel">
                     <div class="p-3 bg-dark border rounded border-secondary">
                         <div class="card bg-dark text-white">
                             <div class="card-header">Report an avatar</div>
                             <div class="card-body">
                                 <p class="text-secondary">
-                                    Send an avatar to the World Balancer team.
+                                    Send an avatar to the World Balancer staff.
                                     Your Discord ID from Settings is sent with
                                     the report.
                                 </p>
@@ -405,6 +469,11 @@ SOFTWARE.
                                         autocomplete="off"
                                         spellcheck="false"
                                     />
+                                    <div
+                                        class="form-text text-secondary"
+                                        id="reportAvatarName"
+                                        hidden
+                                    ></div>
                                 </div>
                                 <div class="mb-3">
                                     <label for="reportReason" class="form-label"
@@ -445,7 +514,7 @@ SOFTWARE.
         </div>
 
         <footer class="text-center mt-5">
-            <h2>Copyright © 2026 World Balancer Version: 0.0.7</h2>
+            <h2>Copyright © 2026 World Balancer</h2>
         </footer>
 
         <script
@@ -506,6 +575,7 @@ SOFTWARE.
 
                     logElement.textContent = logData.message;
 
+                    // "Found avatar ID: avtr_..." lines get a Report button
                     const found = /^Found avatar ID: (avtr_[0-9a-f-]+)$/i.exec(
                         logData.message,
                     );
@@ -620,9 +690,16 @@ SOFTWARE.
                 reportStatus.hidden = false;
             }
 
-            function openReport(avatarId) {
+            // Called by the Report button on a log line: opens the Report tab
+            // with that avatar ID filled in.
+            function openReport(avatarId, avatarName) {
                 reportAvatarInput.value = avatarId;
                 reportStatus.hidden = true;
+                const nameHint = document.getElementById("reportAvatarName");
+                nameHint.textContent = avatarName
+                    ? `Avatar name: ${avatarName}`
+                    : "";
+                nameHint.hidden = !avatarName;
                 new bootstrap.Tab(document.getElementById("report-tab")).show();
                 reportReasonInput.focus();
             }
@@ -656,7 +733,13 @@ SOFTWARE.
                           ? "info"
                           : "danger";
                     showReportStatus(kind, result.message);
+                    if (result.ok || result.code === "duplicate") {
+                        reportedIds.add(avatarId);
+                        scheduleAvatarRender();
+                    }
                     if (result.ok) {
+                        document.getElementById("reportAvatarName").hidden =
+                            true;
                         reportAvatarInput.value = "";
                         reportReasonInput.value = "";
                         reportReasonCount.textContent = "0";
@@ -670,6 +753,159 @@ SOFTWARE.
             }
 
             reportSubmitBtn.addEventListener("click", submitReport);
+        </script>
+
+        <script>
+            const seenAvatars = new Map(); // avatar id -> entry from the main process
+            const reportedIds = new Set(); // avatar ids reported from this window
+
+            const avatarRowsEl = document.getElementById("avatarRows");
+            const avatarFilterEl = document.getElementById("avatarFilter");
+            const avatarCountEl = document.getElementById("avatarCount");
+            const avatarEmptyEl = document.getElementById("avatarEmpty");
+            let avatarRenderTimer = null;
+
+            // Bursts of updates (joining a busy instance) become one redraw
+            function scheduleAvatarRender() {
+                if (avatarRenderTimer) return;
+                avatarRenderTimer = setTimeout(() => {
+                    avatarRenderTimer = null;
+                    renderAvatars();
+                }, 150);
+            }
+
+            function makeCell(text, className) {
+                const td = document.createElement("td");
+                if (className) td.className = className;
+                td.textContent = text;
+                return td;
+            }
+
+            function renderAvatars() {
+                const filter = avatarFilterEl.value.trim().toLowerCase();
+                const list = [...seenAvatars.values()]
+                    .sort((a, b) => b.lastSeen - a.lastSeen)
+                    .filter(
+                        (a) =>
+                            !filter ||
+                            [
+                                a.name,
+                                a.id,
+                                a.lookup === "private" ? "private" : null,
+                            ].some(
+                                (v) => v && v.toLowerCase().includes(filter),
+                            ),
+                    );
+
+                avatarRowsEl.replaceChildren();
+                for (const a of list) {
+                    const tr = document.createElement("tr");
+
+                    let nameText;
+                    let nameClass = "";
+                    let nameTitle = "";
+                    if (a.lookup === "found") {
+                        nameText = a.name;
+                    } else if (a.lookup === "private") {
+                        nameText = "Private";
+                        nameClass = "text-warning";
+                        nameTitle = "The avatar server said: Avatar not found";
+                    } else if (a.lookup === "error") {
+                        nameText = "Lookup failed";
+                        nameClass = "text-danger";
+                        nameTitle = a.error || "";
+                    } else {
+                        nameText = "Looking up...";
+                        nameClass = "text-secondary";
+                    }
+                    const nameCell = makeCell(nameText, nameClass);
+                    if (nameTitle) nameCell.title = nameTitle;
+                    tr.append(
+                        nameCell,
+                        makeCell(a.id, "font-monospace"),
+                        makeCell(new Date(a.lastSeen).toLocaleTimeString()),
+                    );
+
+                    const actionCell = document.createElement("td");
+                    if (a.lookup === "error" || a.lookup === "private") {
+                        const retry = document.createElement("button");
+                        retry.type = "button";
+                        retry.className =
+                            "btn btn-sm btn-outline-secondary me-2";
+                        retry.textContent = "Retry";
+                        retry.addEventListener("click", async () => {
+                            retry.disabled = true;
+                            try {
+                                await window.api.retryAvatarLookup(a.id);
+                            } catch (error) {
+                                console.error("Retry failed:", error);
+                                retry.disabled = false;
+                            }
+                        });
+                        actionCell.append(retry);
+                    }
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.className =
+                        "btn btn-sm btn-outline-warning log-report-btn";
+                    btn.textContent = "Report";
+                    btn.addEventListener("click", () =>
+                        openReport(a.id, a.lookup === "found" ? a.name : null),
+                    );
+                    actionCell.append(btn);
+                    if (reportedIds.has(a.id)) {
+                        const done = document.createElement("span");
+                        done.className = "text-success ms-2 small";
+                        done.textContent = "Reported";
+                        actionCell.append(done);
+                    }
+                    tr.append(actionCell);
+                    avatarRowsEl.append(tr);
+                }
+
+                avatarCountEl.textContent = seenAvatars.size
+                    ? `${list.length} of ${seenAvatars.size}`
+                    : "";
+                avatarEmptyEl.hidden = list.length > 0;
+                avatarEmptyEl.textContent = seenAvatars.size
+                    ? "No avatars match the filter."
+                    : "No avatars seen yet. They appear here while VRChat is running.";
+            }
+
+            avatarFilterEl.addEventListener("input", renderAvatars);
+            document
+                .getElementById("avatarClear")
+                .addEventListener("click", async () => {
+                    seenAvatars.clear();
+                    renderAvatars();
+                    try {
+                        await window.api.clearSeenAvatars();
+                    } catch (error) {
+                        console.error("Failed to clear the list:", error);
+                    }
+                });
+
+            async function initAvatarList() {
+                // Updates are applied by avatar id, so one that arrives while the
+                // full list is still loading is never lost or doubled.
+                window.api.onSeenAvatarsUpdate((msg) => {
+                    if (msg.type === "clear") seenAvatars.clear();
+                    else if (msg.type === "remove") seenAvatars.delete(msg.id);
+                    else if (msg.type === "upsert" && msg.avatar)
+                        seenAvatars.set(msg.avatar.id, msg.avatar);
+                    scheduleAvatarRender();
+                });
+
+                try {
+                    const list = await window.api.getSeenAvatars();
+                    for (const a of list) seenAvatars.set(a.id, a);
+                } catch (error) {
+                    console.error("Failed to load seen avatars:", error);
+                }
+                renderAvatars();
+            }
+
+            initAvatarList();
         </script>
     </body>
 </html>

@@ -189,11 +189,19 @@ function log(message, level = "info", type = "main_log") {
   }
 }
 
+// Sends something to the window (no-op while it is closed or still loading;
+// the window asks for the full state when it opens).
+function sendToWindow(channel, data) {
+  if (mainWindow && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send(channel, data);
+  }
+}
+
 function initAppWindow() {
   if (mainWindow) return;
 
   mainWindow = new BrowserWindow({
-    width: 800,
+    width: 825,
     height: 825,
     icon: path.join(__dirname, "assets", "icon.png"),
     webPreferences: {
@@ -224,6 +232,20 @@ ipcMain.handle(
   async (_, config) => await saveConfigRecursively(config),
 );
 ipcMain.handle("get-app-version", () => version);
+
+// Avatars tab: the list kept by seenAvatars.js (required lazily, see below).
+ipcMain.handle("get-seen-avatars", () =>
+  require("./avilogger/seenAvatars.js").getSeenAvatars(),
+);
+ipcMain.handle("clear-seen-avatars", () =>
+  require("./avilogger/seenAvatars.js").clearSeenAvatars(),
+);
+
+ipcMain.handle("retry-avatar-lookup", (_, id) =>
+  typeof id === "string"
+    ? require("./avilogger/seenAvatars.js").retryLookup(id)
+    : false,
+);
 
 // "Report" button: the window asks, reportQueue.js sends it to the reports API.
 // Required lazily because reportQueue requires this module (same reason as the
@@ -301,4 +323,4 @@ app.on("before-quit", (event) => {
     });
 });
 
-module.exports = { log };
+module.exports = { log, sendToWindow };

@@ -36,6 +36,18 @@ contextBridge.exposeInMainWorld("api", {
   loadConfig: () => ipcRenderer.invoke("load-config"),
   saveConfig: (config) => ipcRenderer.invoke("save-config", config),
 
+  // Avatars tab: avatars seen in the log (full list, live updates, clear)
+  getSeenAvatars: () => ipcRenderer.invoke("get-seen-avatars"),
+  clearSeenAvatars: () => ipcRenderer.invoke("clear-seen-avatars"),
+  retryAvatarLookup: (id) => ipcRenderer.invoke("retry-avatar-lookup", id),
+  onSeenAvatarsUpdate: (callback) => {
+    const subscription = (event, data) => callback(data);
+    ipcRenderer.on("seen-avatars-update", subscription);
+    return () => {
+      ipcRenderer.removeListener("seen-avatars-update", subscription);
+    };
+  },
+
   // Report an avatar to World Balancer. Resolves to { ok, code, message }.
   reportAvatar: (avatarId, reason) =>
     ipcRenderer.invoke("report-avatar", { avatarId, reason }),

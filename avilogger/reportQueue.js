@@ -35,10 +35,7 @@ const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
 const { normalizeDiscordId, retryWaitMs } = require("./avatarQueue.js");
 
-// WB_REPORT_URL is only meant for testing against a local server.
-const REPORT_URL =
-  process.env.WB_REPORT_URL ||
-  "https://avatarwbvrcxsearch.worldbalancer.com/reports";
+const REPORT_URL = "https://avatarwbvrcxsearch.worldbalancer.com/reports";
 
 const MAX_REASON_LENGTH = 500; // the server rejects anything longer
 const MAX_RETRIES = 2;
@@ -112,7 +109,9 @@ function serverMessage(err) {
  */
 function validateReportInput(avatarId, reason) {
   if (typeof avatarId !== "string" || !AVATAR_ID_REGEX.test(avatarId.trim())) {
-    return { error: "That is not a valid avatar ID (avtr_ followed by a UUID)." };
+    return {
+      error: "That is not a valid avatar ID (avtr_ followed by a UUID).",
+    };
   }
   if (reason !== undefined && reason !== null && typeof reason !== "string") {
     return { error: "The reason must be text." };
@@ -146,7 +145,8 @@ function failureResult(err) {
     message = "The report server is having problems. Try again later.";
   } else if (!err?.response && NETWORK_ERROR_CODES.has(err?.code)) {
     code = "network";
-    message = "Could not reach the report server. Check your internet connection.";
+    message =
+      "Could not reach the report server. Check your internet connection.";
   } else {
     message = `The report could not be sent (${err?.message || "unknown error"}).`;
   }
@@ -262,7 +262,11 @@ async function runWorker() {
 function submitReport(avatarId, reason) {
   const clean = validateReportInput(avatarId, reason);
   if (clean.error) {
-    return Promise.resolve({ ok: false, code: "invalid", message: clean.error });
+    return Promise.resolve({
+      ok: false,
+      code: "invalid",
+      message: clean.error,
+    });
   }
 
   const existing = inFlight.get(clean.avatarId);
