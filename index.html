@@ -429,9 +429,8 @@ SOFTWARE.
                             >
                                 <thead>
                                     <tr>
-                                        <th>Avatar name</th>
-                                        <th>Avatar ID</th>
-                                        <th>Last seen</th>
+                                        <th>Avatar name / ID</th>
+                                        <th>Seen</th>
                                         <th></th>
                                     </tr>
                                 </thead>
@@ -818,13 +817,28 @@ SOFTWARE.
                         nameText = "Looking up...";
                         nameClass = "text-secondary";
                     }
-                    const nameCell = makeCell(nameText, nameClass);
-                    if (nameTitle) nameCell.title = nameTitle;
-                    tr.append(
-                        nameCell,
-                        makeCell(a.id, "font-monospace"),
-                        makeCell(new Date(a.lastSeen).toLocaleTimeString()),
+                    // Name on top, the ID small underneath (one column, so the
+                    // Report button always stays visible)
+                    const nameCell = document.createElement("td");
+                    nameCell.style.wordBreak = "break-word";
+                    const nameLine = document.createElement("div");
+                    nameLine.textContent = nameText;
+                    if (nameClass) nameLine.className = nameClass;
+                    if (nameTitle) nameLine.title = nameTitle;
+                    const idLine = document.createElement("div");
+                    idLine.className = "font-monospace text-secondary";
+                    idLine.style.fontSize = "0.72rem";
+                    idLine.style.userSelect = "all";
+                    idLine.textContent = a.id;
+                    nameCell.append(nameLine, idLine);
+                    const timeCell = makeCell(
+                        new Date(a.lastSeen).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                        }),
+                        "small text-secondary text-nowrap",
                     );
+                    tr.append(nameCell, timeCell);
 
                     const actionCell = document.createElement("td");
                     if (a.lookup === "error" || a.lookup === "private") {
