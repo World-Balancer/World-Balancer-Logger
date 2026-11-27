@@ -180,8 +180,9 @@ function failureResult(err) {
   return { ok: false, code, message };
 }
 
-async function sendReport({ avatarId, reason }) {
-  // Read each time: the user may have changed it in Settings meanwhile
+// The Discord ID to send, or null when none is set or it is not valid.
+// Read each time: the user may have changed it in Settings meanwhile.
+async function readDiscordId() {
   let discordId = null;
   try {
     discordId = normalizeDiscordId(
@@ -192,82 +193,100 @@ async function sendReport({ avatarId, reason }) {
   } catch (err) {
     reportError(`[Report] Could not read Userid.discord_id: ${err.message}`);
   }
-  if (!discordId || !DISCORD_ID_REGEX.test(discordId)) {
-    return {
-      ok: false,
-      code: "no_discord_id",
-      message:
-        "Set your Discord ID in the Settings tab first (17-20 digits), then try again.",
-    };
-  }
+  return discordId && DISCORD_ID_REGEX.test(discordId) ? discordId : null;
+}
 
+function noDiscordIdResult() {
+  return {
+    ok: false,
+    code: "no_discord_id",
+    message:
+      "Set your Discord ID in the Settings tab first (17-20 digits), then try again.",
+  };
+}
+
+function buildReportBody(avatarId, discordId, reason) {
   const body = { avatar_id: avatarId, discord_id: discordId };
   if (reason) body.reason = reason;
+  return body;
+}
 
+function createdResult(avatarId, reportId, note = "") {
+  logToMain(
+    `[Report] Sent for ${avatarId}${reportId ? ` (report #${reportId})` : ""}${note}`,
+  );
+  return {
+    ok: true,
+    code: "created",
+    reportId,
+    message: reportId
+      ? `Report #${reportId} sent. Thank you!`
+      : "Report sent. Thank you!",
+  };
+}
+
+// The server already has an open report from this user for this avatar.
+function conflictResult(avatarId, maybeSent) {
+  if (maybeSent) {
+    // Our own earlier attempt was stored and only its answer got lost,
+    // so this 409 is that report, not an older one.
+    return createdResult(avatarId, null, " (confirmed on retry)");
+  }
+  logToMain(`[Report] Already reported: ${avatarId}`);
+  return {
+    ok: false,
+    code: "duplicate",
+    message: "You already have an open report for this avatar.",
+  };
+}
+
+function logFailedAttempt(avatarId, err) {
+  reportError(
+    `[Report] FAILED ${avatarId} | code=${err.code} | status=${err.response?.status || "N/A"} | ${err.message}`,
+  );
+}
+
+// How long to wait before the next attempt, and whether to make one at all.
+// Also records a server cooldown so every later report honors it too.
+function planRetry(err, attempt) {
+  const serverWait = parseRetryAfterMs(err.response?.headers?.["retry-after"]);
+  const wait = serverWait ?? retryWaitMs(err, attempt);
+
+  if (err.response?.status === 429 || serverWait != null) {
+    pausedUntil = Math.max(
+      pausedUntil,
+      Date.now() + Math.min(wait, MAX_SERVER_PAUSE_MS),
+    );
+  }
+  const canRetry = attempt < MAX_RETRIES && wait <= MAX_RETRY_WAIT_MS;
+  return { canRetry, wait };
+}
+
+async function sendReport({ avatarId, reason }) {
+  const discordId = await readDiscordId();
+  if (!discordId) return noDiscordIdResult();
+
+  const body = buildReportBody(avatarId, discordId, reason);
   let lastErr = null;
   let maybeSent = false; // an earlier attempt may have been stored by the server
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await axiosInstance.post(REPORT_URL, body);
-      const reportId = res.data?.id ?? null;
-      logToMain(
-        `[Report] Sent for ${avatarId}${reportId ? ` (report #${reportId})` : ""}`,
-      );
-      return {
-        ok: true,
-        code: "created",
-        reportId,
-        message: reportId
-          ? `Report #${reportId} sent. Thank you!`
-          : "Report sent. Thank you!",
-      };
+      return createdResult(avatarId, res.data?.id ?? null);
     } catch (err) {
       lastErr = err;
-
-      // The server already has an open report from this user for this avatar
       if (err.response?.status === 409) {
-        if (maybeSent) {
-          // Our own earlier attempt was stored and only its answer got lost,
-          // so this 409 is that report, not an older one.
-          logToMain(`[Report] Sent for ${avatarId} (confirmed on retry)`);
-          return {
-            ok: true,
-            code: "created",
-            reportId: null,
-            message: "Report sent. Thank you!",
-          };
-        }
-        logToMain(`[Report] Already reported: ${avatarId}`);
-        return {
-          ok: false,
-          code: "duplicate",
-          message: "You already have an open report for this avatar.",
-        };
+        return conflictResult(avatarId, maybeSent);
       }
-
-      reportError(
-        `[Report] FAILED ${avatarId} | code=${err.code} | status=${err.response?.status || "N/A"} | ${err.message}`,
-      );
+      logFailedAttempt(avatarId, err);
 
       // 400/403/404...: sending the same thing again won't help
       if (!isRetryable(err)) break;
       if (isAmbiguousFailure(err)) maybeSent = true;
 
-      const serverWait = parseRetryAfterMs(
-        err.response?.headers?.["retry-after"],
-      );
-      const wait = serverWait ?? retryWaitMs(err, attempt);
-      const canRetry = attempt < MAX_RETRIES && wait <= MAX_RETRY_WAIT_MS;
-
-      // Honor the server's full cooldown for every later report too
-      if (err.response?.status === 429 || serverWait != null) {
-        pausedUntil = Math.max(
-          pausedUntil,
-          Date.now() + Math.min(wait, MAX_SERVER_PAUSE_MS),
-        );
-      }
+      const { canRetry, wait } = planRetry(err, attempt);
       if (!canRetry) break;
-
       await sleep(wait);
     }
   }
