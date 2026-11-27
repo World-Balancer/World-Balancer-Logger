@@ -450,7 +450,7 @@ SOFTWARE.
                             <div class="card-header">Report an avatar</div>
                             <div class="card-body">
                                 <p class="text-secondary">
-                                    Send an avatar to the World Balancer staff.
+                                    Send an avatar to the World Balancer Team.
                                     Your Discord ID from Settings is sent with
                                     the report.
                                 </p>
@@ -841,7 +841,7 @@ SOFTWARE.
                     tr.append(nameCell, timeCell);
 
                     const actionCell = document.createElement("td");
-                    if (a.lookup === "error" || a.lookup === "private") {
+                    if (a.lookup === "error") {
                         const retry = document.createElement("button");
                         retry.type = "button";
                         retry.className =

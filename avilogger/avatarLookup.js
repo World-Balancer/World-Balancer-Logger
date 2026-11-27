@@ -64,8 +64,9 @@ const BREAKER_PAUSE_MS = 60 * 1000; // ...and nothing is sent for this long
 
 const MAX_NAME_LENGTH = 100;
 
+// Same check as the server's /vrc_avatar route, so we never refuse an ID it would accept
 const AVATAR_ID_REGEX =
-  /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
