@@ -32,8 +32,9 @@ SOFTWARE.
 //   { status: "private" }
 //   { status: "error",   message }   (server unreachable or answered oddly)
 //
-// Lookups are gentle on the server: two at a time with a short pause, the same
-// avatar is never asked for twice at once, answers are remembered, and after
+// Lookups are gentle on the server: they wait in a queue and go out one at a
+// time with a pause between them, the same avatar is never asked for twice,
+// answers are remembered, a 429 "slow down" pauses the whole queue, and after
 // repeated failures nothing is sent for a minute.
 
 const axios = require("axios");
@@ -45,8 +46,10 @@ const { parseRetryAfterMs } = require("./avatarQueue.js");
 
 const LOOKUP_URL = "https://avatarwbvrcxsearch.worldbalancer.com/vrc_avatar";
 
-const MAX_PARALLEL = 2;
-const MIN_GAP_MS = 150; // pause after each request
+// One lookup at a time, in the order the avatars were seen, with a pause
+// between requests (about 2 per second at most, however many avatars load).
+const MIN_GAP_MS = 500;
+const MAX_QUEUE = 300; // lookups waiting; more than this get "busy" (Retry)
 const MAX_RETRIES = 1; // for temporary errors (network, 429, 5xx)
 const RETRY_DELAY_MS = 2000;
 const MAX_RETRY_WAIT_MS = 10000;
@@ -67,7 +70,7 @@ const AVATAR_ID_REGEX =
 const httpsAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 30000,
-  maxSockets: MAX_PARALLEL,
+  maxSockets: 1,
   maxFreeSockets: 1,
   scheduling: "lifo",
 });
@@ -91,10 +94,11 @@ function reportError(message) {
 
 const cache = new Map(); // avatar id -> { result, expires }
 const inflight = new Map(); // avatar id -> Promise
-let active = 0;
-const waiting = [];
+const queue = []; // [{ id, resolve }] in the order they were asked for
+let running = false;
 let consecutiveFailures = 0;
 let breakerUntil = 0;
+let pausedUntil = 0; // set by 429 / Retry-After: the whole queue waits
 
 function remember(id, result, ttl) {
   cache.delete(id); // re-insert so the oldest entry is the first one in the map
@@ -104,48 +108,43 @@ function remember(id, result, ttl) {
   }
 }
 
-function acquire() {
-  return new Promise((resolve) => {
-    if (active < MAX_PARALLEL) {
-      active += 1;
-      resolve();
-    } else {
-      waiting.push(resolve);
-    }
-  });
-}
-
-function release() {
-  const next = waiting.shift();
-  if (next) next(); // the slot goes straight to the next waiting lookup
-  else active -= 1;
-}
-
 // One request. Resolves to { done: result }, or { error, retry?, waitMs? }.
 async function requestOnce(id) {
   let res;
   try {
     res = await axiosInstance.get(`${LOOKUP_URL}/${encodeURIComponent(id)}`);
   } catch (err) {
-    return { error: `could not reach the avatar server (${err.code || err.message})`, retry: true };
+    return {
+      error: `could not reach the avatar server (${err.code || err.message})`,
+      retry: true,
+    };
   }
 
   const body = res.data && typeof res.data === "object" ? res.data : null;
   const text = body ? body.error || body.message : null;
 
   // The server's way of saying it has no such avatar
-  if (res.status === 404 || (typeof text === "string" && /avatar not found/i.test(text))) {
+  if (
+    res.status === 404 ||
+    (typeof text === "string" && /avatar not found/i.test(text))
+  ) {
     return { done: { status: "private" } };
   }
 
   if (res.status === 200) {
     const name = body && typeof body.name === "string" ? body.name.trim() : "";
     const idMatches =
-      !body || typeof body.id !== "string" || body.id.toLowerCase() === id.toLowerCase();
+      !body ||
+      typeof body.id !== "string" ||
+      body.id.toLowerCase() === id.toLowerCase();
     if (name && idMatches) {
-      return { done: { status: "found", name: name.slice(0, MAX_NAME_LENGTH) } };
+      return {
+        done: { status: "found", name: name.slice(0, MAX_NAME_LENGTH) },
+      };
     }
-    return { error: "the avatar server sent an answer that could not be understood" };
+    return {
+      error: "the avatar server sent an answer that could not be understood",
+    };
   }
 
   if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
@@ -158,6 +157,7 @@ async function requestOnce(id) {
   return { error: `the avatar server answered ${res.status}` };
 }
 
+// Runs one queued lookup (with its retries) and returns its result.
 async function doLookup(id) {
   if (Date.now() < breakerUntil) {
     return {
@@ -166,40 +166,83 @@ async function doLookup(id) {
     };
   }
 
-  await acquire();
-  try {
-    let last = null;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const r = await requestOnce(id);
+  let last = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const r = await requestOnce(id);
 
-      if (r.done) {
-        consecutiveFailures = 0;
-        remember(id, r.done, r.done.status === "found" ? FOUND_TTL_MS : PRIVATE_TTL_MS);
-        return r.done;
-      }
-
-      last = r;
-      if (!r.retry || attempt === MAX_RETRIES) break;
-      await sleep(Math.min(r.waitMs ?? RETRY_DELAY_MS * (attempt + 1), MAX_RETRY_WAIT_MS));
-    }
-
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= BREAKER_FAILURES) {
-      breakerUntil = Date.now() + BREAKER_PAUSE_MS;
+    if (r.done) {
       consecutiveFailures = 0;
-      main.log(
-        "[Lookup] The avatar server is not answering. Pausing name lookups for a minute.",
-        "warn",
-        "main_log",
+      remember(
+        id,
+        r.done,
+        r.done.status === "found" ? FOUND_TTL_MS : PRIVATE_TTL_MS,
       );
+      return r.done;
     }
-    const result = { status: "error", message: last.error };
-    remember(id, result, ERROR_TTL_MS);
-    reportError(`[Lookup] ${id}: ${last.error}`);
-    return result;
+
+    last = r;
+    if (!r.retry || attempt === MAX_RETRIES) break;
+    const wait = Math.min(
+      r.waitMs ?? RETRY_DELAY_MS * (attempt + 1),
+      MAX_RETRY_WAIT_MS,
+    );
+    // Everything behind this lookup waits too, not just this one
+    pausedUntil = Math.max(pausedUntil, Date.now() + wait);
+    await sleep(wait);
+  }
+
+  consecutiveFailures += 1;
+  if (consecutiveFailures >= BREAKER_FAILURES) {
+    breakerUntil = Date.now() + BREAKER_PAUSE_MS;
+    consecutiveFailures = 0;
+    main.log(
+      "[Lookup] The avatar server is not answering. Pausing name lookups for a minute.",
+      "warn",
+      "main_log",
+    );
+  }
+  const result = { status: "error", message: last.error };
+  remember(id, result, ERROR_TTL_MS);
+  reportError(`[Lookup] ${id}: ${last.error}`);
+  return result;
+}
+
+async function runWorker() {
+  if (running) return;
+  running = true;
+  try {
+    while (queue.length > 0) {
+      const wait = pausedUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+
+      const job = queue.shift();
+      let result;
+      try {
+        result = await doLookup(job.id);
+      } catch (err) {
+        reportError(`[Lookup] Unexpected error for ${job.id}: ${err.message}`);
+        result = {
+          status: "error",
+          message: "Something went wrong during the lookup.",
+        };
+      }
+      job.resolve(result);
+      if (queue.length > 0) await sleep(MIN_GAP_MS);
+    }
   } finally {
-    await sleep(MIN_GAP_MS);
-    release();
+    running = false;
+    if (queue.length > 0) runWorker(); // a job arrived while the loop was ending
+  }
+}
+
+/**
+ * Drops every lookup that has not been sent yet (used when the list is cleared).
+ * Their promises resolve with an error nobody is waiting for.
+ */
+function clearLookupQueue() {
+  for (const job of queue.splice(0)) {
+    inflight.delete(job.id);
+    job.resolve({ status: "error", message: "Cancelled." });
   }
 }
 
@@ -208,7 +251,10 @@ async function doLookup(id) {
  */
 function lookupAvatar(id) {
   if (typeof id !== "string" || !AVATAR_ID_REGEX.test(id)) {
-    return Promise.resolve({ status: "error", message: "Not a valid avatar ID." });
+    return Promise.resolve({
+      status: "error",
+      message: "Not a valid avatar ID.",
+    });
   }
 
   const hit = cache.get(id);
@@ -217,13 +263,17 @@ function lookupAvatar(id) {
   const running = inflight.get(id);
   if (running) return running;
 
-  const promise = doLookup(id)
-    .catch((err) => {
-      reportError(`[Lookup] Unexpected error for ${id}: ${err.message}`);
-      return { status: "error", message: "Something went wrong during the lookup." };
-    })
-    .finally(() => inflight.delete(id));
+  if (queue.length >= MAX_QUEUE) {
+    return Promise.resolve({
+      status: "error",
+      message: "Too many lookups are waiting. Press Retry in a moment.",
+    });
+  }
+
+  const promise = new Promise((resolve) => queue.push({ id, resolve }));
   inflight.set(id, promise);
+  promise.then(() => inflight.delete(id));
+  runWorker();
   return promise;
 }
 
@@ -238,4 +288,9 @@ function resetLookupBreaker() {
   consecutiveFailures = 0;
 }
 
-module.exports = { lookupAvatar, forgetAvatar, resetLookupBreaker };
+module.exports = {
+  lookupAvatar,
+  forgetAvatar,
+  resetLookupBreaker,
+  clearLookupQueue,
+};

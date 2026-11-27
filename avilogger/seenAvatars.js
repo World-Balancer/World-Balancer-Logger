@@ -35,7 +35,11 @@ SOFTWARE.
 // its own errors.
 
 const main = require("../main");
-const { lookupAvatar, forgetAvatar } = require("./avatarLookup.js");
+const {
+  lookupAvatar,
+  forgetAvatar,
+  clearLookupQueue,
+} = require("./avatarLookup.js");
 
 const MAX_ENTRIES = 300;
 
@@ -138,6 +142,7 @@ function getSeenAvatars() {
 
 function clearSeenAvatars() {
   entries.clear();
+  clearLookupQueue(); // no point asking the server about avatars no longer listed
   emit({ type: "clear" });
 }
 
