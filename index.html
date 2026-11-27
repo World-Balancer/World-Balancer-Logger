@@ -249,6 +249,14 @@ SOFTWARE.
                 z-index: 1050;
                 display: none;
             }
+
+            .log-report-btn {
+                width: auto !important;
+                margin: 0 0 0 10px !important;
+                padding: 0 8px;
+                font-size: 0.75rem;
+                vertical-align: baseline;
+            }
         </style>
     </head>
 
@@ -287,6 +295,17 @@ SOFTWARE.
                         role="tab"
                     >
                         <i class="bi bi-gear"></i> Settings
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a
+                        class="nav-link"
+                        id="report-tab"
+                        data-bs-toggle="tab"
+                        href="#report"
+                        role="tab"
+                    >
+                        <i class="bi bi-flag"></i> Report
                     </a>
                 </li>
             </ul>
@@ -361,11 +380,72 @@ SOFTWARE.
                         </div>
                     </div>
                 </div>
+
+                <div class="tab-pane fade" id="report" role="tabpanel">
+                    <div class="p-3 bg-dark border rounded border-secondary">
+                        <div class="card bg-dark text-white">
+                            <div class="card-header">Report an avatar</div>
+                            <div class="card-body">
+                                <p class="text-secondary">
+                                    Send an avatar to the World Balancer team.
+                                    Your Discord ID from Settings is sent with
+                                    the report.
+                                </p>
+                                <div class="mb-3">
+                                    <label
+                                        for="reportAvatarId"
+                                        class="form-label"
+                                        >Avatar ID</label
+                                    >
+                                    <input
+                                        type="text"
+                                        class="form-control form-control-dark"
+                                        id="reportAvatarId"
+                                        placeholder="avtr_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                        autocomplete="off"
+                                        spellcheck="false"
+                                    />
+                                </div>
+                                <div class="mb-3">
+                                    <label for="reportReason" class="form-label"
+                                        >Reason (optional)</label
+                                    >
+                                    <textarea
+                                        class="form-control form-control-dark"
+                                        id="reportReason"
+                                        rows="3"
+                                        maxlength="500"
+                                        placeholder="Why are you reporting this avatar?"
+                                    ></textarea>
+                                    <div
+                                        class="form-text text-secondary text-end"
+                                    >
+                                        <span id="reportReasonCount">0</span
+                                        >/500
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="btn btn-warning"
+                                    id="reportSubmit"
+                                >
+                                    <i class="bi bi-flag"></i> Send report
+                                </button>
+                                <div
+                                    id="reportStatus"
+                                    class="alert mt-3 mb-0"
+                                    role="alert"
+                                    hidden
+                                ></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
 
         <footer class="text-center mt-5">
-            <h2>Copyright © 2026 World Balancer</h2>
+            <h2>Copyright © 2026 World Balancer Version: 0.0.7</h2>
         </footer>
 
         <script
@@ -425,6 +505,22 @@ SOFTWARE.
                         logElement.classList.add("log-warn");
 
                     logElement.textContent = logData.message;
+
+                    const found = /^Found avatar ID: (avtr_[0-9a-f-]+)$/i.exec(
+                        logData.message,
+                    );
+                    if (found) {
+                        const reportBtn = document.createElement("button");
+                        reportBtn.type = "button";
+                        reportBtn.className =
+                            "btn btn-sm btn-outline-warning log-report-btn";
+                        reportBtn.textContent = "Report";
+                        reportBtn.addEventListener("click", () =>
+                            openReport(found[1]),
+                        );
+                        logElement.appendChild(reportBtn);
+                    }
+
                     logsDivMain.appendChild(logElement);
 
                     while (logsDivMain.childNodes.length > MAX_LOG_LINES) {
@@ -505,6 +601,75 @@ SOFTWARE.
             }
 
             init();
+        </script>
+
+        <script>
+            const AVATAR_ID_REGEX =
+                /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+            const reportAvatarInput = document.getElementById("reportAvatarId");
+            const reportReasonInput = document.getElementById("reportReason");
+            const reportReasonCount =
+                document.getElementById("reportReasonCount");
+            const reportSubmitBtn = document.getElementById("reportSubmit");
+            const reportStatus = document.getElementById("reportStatus");
+
+            function showReportStatus(kind, message) {
+                reportStatus.className = `alert alert-${kind} mt-3 mb-0`;
+                reportStatus.textContent = message; // text, never HTML
+                reportStatus.hidden = false;
+            }
+
+            function openReport(avatarId) {
+                reportAvatarInput.value = avatarId;
+                reportStatus.hidden = true;
+                new bootstrap.Tab(document.getElementById("report-tab")).show();
+                reportReasonInput.focus();
+            }
+
+            reportReasonInput.addEventListener("input", () => {
+                reportReasonCount.textContent = reportReasonInput.value.length;
+            });
+
+            async function submitReport() {
+                const avatarId = reportAvatarInput.value.trim();
+                const reason = reportReasonInput.value.trim();
+
+                if (!AVATAR_ID_REGEX.test(avatarId)) {
+                    showReportStatus(
+                        "warning",
+                        "Enter a valid avatar ID (avtr_ followed by a UUID).",
+                    );
+                    return;
+                }
+
+                reportSubmitBtn.disabled = true;
+                showReportStatus("secondary", "Sending report...");
+                try {
+                    const result = await window.api.reportAvatar(
+                        avatarId,
+                        reason,
+                    );
+                    const kind = result.ok
+                        ? "success"
+                        : result.code === "duplicate"
+                          ? "info"
+                          : "danger";
+                    showReportStatus(kind, result.message);
+                    if (result.ok) {
+                        reportAvatarInput.value = "";
+                        reportReasonInput.value = "";
+                        reportReasonCount.textContent = "0";
+                    }
+                } catch (error) {
+                    console.error("Report failed:", error);
+                    showReportStatus("danger", "The report could not be sent.");
+                } finally {
+                    reportSubmitBtn.disabled = false;
+                }
+            }
+
+            reportSubmitBtn.addEventListener("click", submitReport);
         </script>
     </body>
 </html>

@@ -225,6 +225,23 @@ ipcMain.handle(
 );
 ipcMain.handle("get-app-version", () => version);
 
+// "Report" button: the window asks, reportQueue.js sends it to the reports API.
+// Required lazily because reportQueue requires this module (same reason as the
+// avatarQueue require in before-quit below).
+ipcMain.handle("report-avatar", async (_, payload) => {
+  try {
+    const { submitReport } = require("./avilogger/reportQueue.js");
+    return await submitReport(payload?.avatarId, payload?.reason);
+  } catch (err) {
+    console.error("report-avatar failed:", err.message);
+    return {
+      ok: false,
+      code: "error",
+      message: "The report could not be sent.",
+    };
+  }
+});
+
 app.on("ready", async () => {
   // Folder problems found while choosing the data folder (unavailable
   // WB_DATA_DIR, no write permission...). They were collected instead of

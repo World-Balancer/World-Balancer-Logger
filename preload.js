@@ -36,6 +36,10 @@ contextBridge.exposeInMainWorld("api", {
   loadConfig: () => ipcRenderer.invoke("load-config"),
   saveConfig: (config) => ipcRenderer.invoke("save-config", config),
 
+  // Report an avatar to World Balancer. Resolves to { ok, code, message }.
+  reportAvatar: (avatarId, reason) =>
+    ipcRenderer.invoke("report-avatar", { avatarId, reason }),
+
   // Log communication from Renderer -> Main Process
   sendLogMessage: (type, message) =>
     ipcRenderer.send("send-log", { type, message }),
