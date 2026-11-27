@@ -401,7 +401,7 @@ SOFTWARE.
                                 type="search"
                                 class="form-control form-control-dark flex-grow-1"
                                 id="avatarFilter"
-                                placeholder="Filter by avatar name, ID or player"
+                                placeholder="Filter by avatar name or ID"
                                 autocomplete="off"
                                 style="max-width: 420px"
                             />
@@ -692,6 +692,12 @@ SOFTWARE.
             // Called by the Report button on a log line: opens the Report tab
             // with that avatar ID filled in.
             function openReport(avatarId, avatarName) {
+                // A different avatar starts a fresh report: drop the old reason
+                if (reportAvatarInput.value.trim() !== avatarId) {
+                    reportReasonInput.value = "";
+                    reportReasonCount.textContent = "0";
+                }
+                reportFormVersion++;
                 reportAvatarInput.value = avatarId;
                 reportStatus.hidden = true;
                 const nameHint = document.getElementById("reportAvatarName");
@@ -703,7 +709,16 @@ SOFTWARE.
                 reportReasonInput.focus();
             }
 
+            // Changes whenever the form is edited or another report is opened.
+            // A submission applies its result to the form only if the version
+            // is still the one it was sent from.
+            let reportFormVersion = 0;
+            reportAvatarInput.addEventListener("input", () => {
+                reportFormVersion++;
+            });
+
             reportReasonInput.addEventListener("input", () => {
+                reportFormVersion++;
                 reportReasonCount.textContent = reportReasonInput.value.length;
             });
 
@@ -719,6 +734,7 @@ SOFTWARE.
                     return;
                 }
 
+                const sentVersion = reportFormVersion;
                 reportSubmitBtn.disabled = true;
                 showReportStatus("secondary", "Sending report...");
                 try {
@@ -726,26 +742,35 @@ SOFTWARE.
                         avatarId,
                         reason,
                     );
-                    const kind = result.ok
-                        ? "success"
-                        : result.code === "duplicate"
-                          ? "info"
-                          : "danger";
-                    showReportStatus(kind, result.message);
+                    // Remember the outcome for the avatar it was sent for
                     if (result.ok || result.code === "duplicate") {
                         reportedIds.add(avatarId);
                         scheduleAvatarRender();
                     }
-                    if (result.ok) {
-                        document.getElementById("reportAvatarName").hidden =
-                            true;
-                        reportAvatarInput.value = "";
-                        reportReasonInput.value = "";
-                        reportReasonCount.textContent = "0";
+                    // The user moved on to another report: leave their form alone
+                    if (sentVersion === reportFormVersion) {
+                        const kind = result.ok
+                            ? "success"
+                            : result.code === "duplicate"
+                              ? "info"
+                              : "danger";
+                        showReportStatus(kind, result.message);
+                        if (result.ok) {
+                            document.getElementById("reportAvatarName").hidden =
+                                true;
+                            reportAvatarInput.value = "";
+                            reportReasonInput.value = "";
+                            reportReasonCount.textContent = "0";
+                        }
                     }
                 } catch (error) {
                     console.error("Report failed:", error);
-                    showReportStatus("danger", "The report could not be sent.");
+                    if (sentVersion === reportFormVersion) {
+                        showReportStatus(
+                            "danger",
+                            "The report could not be sent.",
+                        );
+                    }
                 } finally {
                     reportSubmitBtn.disabled = false;
                 }
@@ -841,7 +866,7 @@ SOFTWARE.
                     tr.append(nameCell, timeCell);
 
                     const actionCell = document.createElement("td");
-                    if (a.lookup === "error") {
+                    if (a.lookup === "error" || a.lookup === "private") {
                         const retry = document.createElement("button");
                         retry.type = "button";
                         retry.className =
@@ -902,17 +927,31 @@ SOFTWARE.
             async function initAvatarList() {
                 // Updates are applied by avatar id, so one that arrives while the
                 // full list is still loading is never lost or doubled.
+                // The snapshot from getSeenAvatars() can be older than events that
+                // arrive while it is in transit: those events win over it.
+                const liveIds = new Set(); // ids touched by a live event
+                let liveCleared = false; // the list was cleared meanwhile
                 window.api.onSeenAvatarsUpdate((msg) => {
-                    if (msg.type === "clear") seenAvatars.clear();
-                    else if (msg.type === "remove") seenAvatars.delete(msg.id);
-                    else if (msg.type === "upsert" && msg.avatar)
+                    if (msg.type === "clear") {
+                        liveCleared = true;
+                        seenAvatars.clear();
+                    } else if (msg.type === "remove") {
+                        liveIds.add(msg.id);
+                        seenAvatars.delete(msg.id);
+                    } else if (msg.type === "upsert" && msg.avatar) {
+                        liveIds.add(msg.avatar.id);
                         seenAvatars.set(msg.avatar.id, msg.avatar);
+                    }
                     scheduleAvatarRender();
                 });
 
                 try {
                     const list = await window.api.getSeenAvatars();
-                    for (const a of list) seenAvatars.set(a.id, a);
+                    if (!liveCleared) {
+                        for (const a of list) {
+                            if (!liveIds.has(a.id)) seenAvatars.set(a.id, a);
+                        }
+                    }
                 } catch (error) {
                     console.error("Failed to load seen avatars:", error);
                 }

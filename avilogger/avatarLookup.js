@@ -52,7 +52,8 @@ const MIN_GAP_MS = 500;
 const MAX_QUEUE = 300; // lookups waiting; more than this get "busy" (Retry)
 const MAX_RETRIES = 1; // for temporary errors (network, 429, 5xx)
 const RETRY_DELAY_MS = 2000;
-const MAX_RETRY_WAIT_MS = 10000;
+const MAX_RETRY_WAIT_MS = 10000; // longest we wait inside one lookup
+const MAX_SERVER_PAUSE_MS = 10 * 60 * 1000; // ceiling for a server Retry-After
 
 const FOUND_TTL_MS = Infinity; // a name does not change during a session
 const PRIVATE_TTL_MS = 30 * 60 * 1000; // an avatar can be made public later
@@ -126,9 +127,10 @@ function isNotFound(res) {
 function readFound(res, id) {
   const body = bodyOf(res);
   const name = body && typeof body.name === "string" ? body.name.trim() : "";
+  // The name counts only when the server says which avatar it belongs to
   const sameId =
-    !body ||
-    typeof body.id !== "string" ||
+    !!body &&
+    typeof body.id === "string" &&
     body.id.toLowerCase() === id.toLowerCase();
   if (name && sameId) {
     return { done: { status: "found", name: name.slice(0, MAX_NAME_LENGTH) } };
@@ -152,6 +154,7 @@ function interpret(res, id) {
     return {
       error,
       retry: true,
+      rateLimited: res.status === 429,
       waitMs: parseRetryAfterMs(res.headers?.["retry-after"]),
     };
   }
@@ -196,13 +199,21 @@ async function doLookup(id) {
     }
 
     last = r;
-    if (!r.retry || attempt === MAX_RETRIES) break;
-    const wait = Math.min(
-      r.waitMs ?? RETRY_DELAY_MS * (attempt + 1),
-      MAX_RETRY_WAIT_MS,
-    );
-    // Everything behind this lookup waits too, not just this one
-    pausedUntil = Math.max(pausedUntil, Date.now() + wait);
+    if (!r.retry) break;
+
+    // The server's full Retry-After is honored (up to a sanity ceiling), also
+    // on the last attempt: everything behind this lookup waits, not just this one.
+    const wait = r.waitMs ?? RETRY_DELAY_MS * (attempt + 1);
+    const canRetry = attempt < MAX_RETRIES && wait <= MAX_RETRY_WAIT_MS;
+    if (r.rateLimited || canRetry) {
+      pausedUntil = Math.max(
+        pausedUntil,
+        Date.now() + Math.min(wait, MAX_SERVER_PAUSE_MS),
+      );
+    }
+    // Too long to wait here: give up on this lookup (Retry later) and let the
+    // worker keep the whole queue paused until the deadline.
+    if (!canRetry) break;
     await sleep(wait);
   }
 

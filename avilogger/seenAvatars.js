@@ -42,6 +42,8 @@ const {
 } = require("./avatarLookup.js");
 
 const MAX_ENTRIES = 300;
+// A private avatar may be made public later; look again when it is seen after this
+const PRIVATE_RECHECK_MS = 30 * 60 * 1000;
 
 const entries = new Map(); // avatar id -> entry
 
@@ -85,6 +87,23 @@ function startLookup(entry) {
     entry.lookup = result.status;
     entry.name = result.status === "found" ? result.name : null;
     entry.error = result.status === "error" ? result.message : null;
+    entry.checkedAt = Date.now();
+    emit({ type: "upsert", avatar: snapshot(entry) });
+  });
+}
+
+// Quietly asks again about a private avatar: it keeps showing "Private" until
+// the server answers, and stays "Private" if the server cannot be reached.
+function recheckPrivate(entry) {
+  const id = entry.id;
+  entry.checkedAt = Date.now(); // one recheck per interval, however often it is seen
+  forgetAvatar(id);
+  lookupAvatar(id).then((result) => {
+    if (entries.get(id) !== entry || result.status === "error") return;
+    if (result.status === "private") return;
+    entry.lookup = result.status;
+    entry.name = result.status === "found" ? result.name : null;
+    entry.error = null;
     emit({ type: "upsert", avatar: snapshot(entry) });
   });
 }
@@ -112,6 +131,12 @@ function noteAvatarId(id, now = Date.now()) {
     }
     entry.lastSeen = now;
     entry.count += 1;
+    if (
+      entry.lookup === "private" &&
+      Date.now() - (entry.checkedAt || 0) >= PRIVATE_RECHECK_MS
+    ) {
+      recheckPrivate(entry);
+    }
     emit({ type: "upsert", avatar: snapshot(entry) });
   } catch (err) {
     console.error(`seenAvatars.noteAvatarId failed: ${err.message}`);

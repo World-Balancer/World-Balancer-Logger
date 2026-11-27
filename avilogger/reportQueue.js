@@ -33,7 +33,11 @@ const main = require("../main");
 const getConfig = require("../models/getConfig");
 const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
-const { normalizeDiscordId, retryWaitMs } = require("./avatarQueue.js");
+const {
+  normalizeDiscordId,
+  retryWaitMs,
+  parseRetryAfterMs,
+} = require("./avatarQueue.js");
 
 const REPORT_URL = "https://avatarwbvrcxsearch.worldbalancer.com/reports";
 
@@ -55,6 +59,27 @@ const NETWORK_ERROR_CODES = new Set([
   "ENOTFOUND",
   "EAI_AGAIN",
 ]);
+
+// Failures where the request certainly never reached the server. Any other
+// network error or a 5xx may have been committed with the answer lost.
+const NOT_SENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+const MAX_SERVER_PAUSE_MS = 10 * 60 * 1000; // ceiling for a server Retry-After
+
+let pausedUntil = 0; // set by 429 / Retry-After: no report goes out before this
+
+// The Discord ID as last saved in Settings. getConfig caches for a few seconds,
+// so the Settings save handler calls noteDiscordIdSaved() to skip that cache.
+let savedDiscordId; // undefined = not saved since start, use getConfig
+
+function noteDiscordIdSaved(id) {
+  savedDiscordId = id;
+}
+
+function isAmbiguousFailure(err) {
+  const status = err.response?.status;
+  if (status) return status >= 500 && status <= 599;
+  return !NOT_SENT_CODES.has(err.code);
+}
 
 const httpsAgent = new https.Agent({
   keepAlive: true,
@@ -159,7 +184,11 @@ async function sendReport({ avatarId, reason }) {
   // Read each time: the user may have changed it in Settings meanwhile
   let discordId = null;
   try {
-    discordId = normalizeDiscordId(await getConfig("Userid.discord_id"));
+    discordId = normalizeDiscordId(
+      savedDiscordId !== undefined
+        ? savedDiscordId
+        : await getConfig("Userid.discord_id"),
+    );
   } catch (err) {
     reportError(`[Report] Could not read Userid.discord_id: ${err.message}`);
   }
@@ -176,6 +205,7 @@ async function sendReport({ avatarId, reason }) {
   if (reason) body.reason = reason;
 
   let lastErr = null;
+  let maybeSent = false; // an earlier attempt may have been stored by the server
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await axiosInstance.post(REPORT_URL, body);
@@ -196,6 +226,17 @@ async function sendReport({ avatarId, reason }) {
 
       // The server already has an open report from this user for this avatar
       if (err.response?.status === 409) {
+        if (maybeSent) {
+          // Our own earlier attempt was stored and only its answer got lost,
+          // so this 409 is that report, not an older one.
+          logToMain(`[Report] Sent for ${avatarId} (confirmed on retry)`);
+          return {
+            ok: true,
+            code: "created",
+            reportId: null,
+            message: "Report sent. Thank you!",
+          };
+        }
         logToMain(`[Report] Already reported: ${avatarId}`);
         return {
           ok: false,
@@ -209,9 +250,25 @@ async function sendReport({ avatarId, reason }) {
       );
 
       // 400/403/404...: sending the same thing again won't help
-      if (!isRetryable(err) || attempt === MAX_RETRIES) break;
+      if (!isRetryable(err)) break;
+      if (isAmbiguousFailure(err)) maybeSent = true;
 
-      await sleep(Math.min(retryWaitMs(err, attempt), MAX_RETRY_WAIT_MS));
+      const serverWait = parseRetryAfterMs(
+        err.response?.headers?.["retry-after"],
+      );
+      const wait = serverWait ?? retryWaitMs(err, attempt);
+      const canRetry = attempt < MAX_RETRIES && wait <= MAX_RETRY_WAIT_MS;
+
+      // Honor the server's full cooldown for every later report too
+      if (err.response?.status === 429 || serverWait != null) {
+        pausedUntil = Math.max(
+          pausedUntil,
+          Date.now() + Math.min(wait, MAX_SERVER_PAUSE_MS),
+        );
+      }
+      if (!canRetry) break;
+
+      await sleep(wait);
     }
   }
 
@@ -228,6 +285,9 @@ async function runWorker() {
 
   try {
     while (queue.length > 0) {
+      const pause = pausedUntil - Date.now();
+      if (pause > 0) await sleep(pause);
+
       const job = queue.shift();
       let result;
       try {
@@ -272,6 +332,16 @@ function submitReport(avatarId, reason) {
   const existing = inFlight.get(clean.avatarId);
   if (existing) return existing;
 
+  // The server asked for a longer cooldown than anyone should wait on screen
+  const pauseLeft = pausedUntil - Date.now();
+  if (pauseLeft > MAX_RETRY_WAIT_MS) {
+    return Promise.resolve({
+      ok: false,
+      code: "busy",
+      message: `The server asked us to wait. Try again in ${Math.ceil(pauseLeft / 1000)} seconds.`,
+    });
+  }
+
   if (queue.length >= MAX_PENDING) {
     return Promise.resolve({
       ok: false,
@@ -290,4 +360,4 @@ function submitReport(avatarId, reason) {
   return promise;
 }
 
-module.exports = { submitReport, validateReportInput };
+module.exports = { submitReport, validateReportInput, noteDiscordIdSaved };
