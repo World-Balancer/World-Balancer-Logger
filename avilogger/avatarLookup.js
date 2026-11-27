@@ -109,6 +109,55 @@ function remember(id, result, ttl) {
   }
 }
 
+// The JSON body of an answer, or null when it is not an object (e.g. an HTML page).
+function bodyOf(res) {
+  return res.data && typeof res.data === "object" ? res.data : null;
+}
+
+// The server's way of saying it has no such avatar: HTTP 404, or that message.
+function isNotFound(res) {
+  if (res.status === 404) return true;
+  const body = bodyOf(res);
+  const text = body ? body.error || body.message : null;
+  return typeof text === "string" && /avatar not found/i.test(text);
+}
+
+// A 200 answer: { done: found } or an error when it is not { id, name }.
+function readFound(res, id) {
+  const body = bodyOf(res);
+  const name = body && typeof body.name === "string" ? body.name.trim() : "";
+  const sameId =
+    !body ||
+    typeof body.id !== "string" ||
+    body.id.toLowerCase() === id.toLowerCase();
+  if (name && sameId) {
+    return { done: { status: "found", name: name.slice(0, MAX_NAME_LENGTH) } };
+  }
+  return {
+    error: "the avatar server sent an answer that could not be understood",
+  };
+}
+
+function isTemporary(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+// Turns one HTTP answer into { done: result } or { error, retry?, waitMs? }.
+function interpret(res, id) {
+  if (isNotFound(res)) return { done: { status: "private" } };
+  if (res.status === 200) return readFound(res, id);
+
+  const error = `the avatar server answered ${res.status}`;
+  if (isTemporary(res.status)) {
+    return {
+      error,
+      retry: true,
+      waitMs: parseRetryAfterMs(res.headers?.["retry-after"]),
+    };
+  }
+  return { error };
+}
+
 // One request. Resolves to { done: result }, or { error, retry?, waitMs? }.
 async function requestOnce(id) {
   let res;
@@ -120,42 +169,7 @@ async function requestOnce(id) {
       retry: true,
     };
   }
-
-  const body = res.data && typeof res.data === "object" ? res.data : null;
-  const text = body ? body.error || body.message : null;
-
-  // The server's way of saying it has no such avatar
-  if (
-    res.status === 404 ||
-    (typeof text === "string" && /avatar not found/i.test(text))
-  ) {
-    return { done: { status: "private" } };
-  }
-
-  if (res.status === 200) {
-    const name = body && typeof body.name === "string" ? body.name.trim() : "";
-    const idMatches =
-      !body ||
-      typeof body.id !== "string" ||
-      body.id.toLowerCase() === id.toLowerCase();
-    if (name && idMatches) {
-      return {
-        done: { status: "found", name: name.slice(0, MAX_NAME_LENGTH) },
-      };
-    }
-    return {
-      error: "the avatar server sent an answer that could not be understood",
-    };
-  }
-
-  if (res.status === 429 || (res.status >= 500 && res.status <= 599)) {
-    return {
-      error: `the avatar server answered ${res.status}`,
-      retry: true,
-      waitMs: parseRetryAfterMs(res.headers?.["retry-after"]),
-    };
-  }
-  return { error: `the avatar server answered ${res.status}` };
+  return interpret(res, id);
 }
 
 // Runs one queued lookup (with its retries) and returns its result.
