@@ -30,6 +30,7 @@ const { getDataDir } = require("./paths");
 
 const { enqueueLogAvatar } = require("./avilogger/avatarQueue.js");
 const { enqueueSwitchStatus } = require("./avilogger/avatarQueue2nd.js");
+const seenAvatars = require("./avilogger/seenAvatars.js");
 
 const appInstallPath = getDataDir();
 const logpath = path.join(appInstallPath, "log");
@@ -957,6 +958,7 @@ function processSwitchLine(log, ctx) {
   }
 
   main.log(`User ${username} switching to ${avatarName}`, "info", "main_log");
+  // Replayed events (ctx.replays > 0) are old: they must not look like new sightings
   trackDelivery(
     { ...ctx, kind: "switch", status: "inflight" },
     deliverSwitch(username, avatarName, canSendFor(ctx)),
@@ -974,6 +976,8 @@ async function processAvatarLine(log, ctx) {
   if (!avatarIdMatch) return;
 
   const avatarId = avatarIdMatch[1];
+  // Listed in the Avatars tab even if it was uploaded before (not only new IDs)
+  if (!ctx.replays) seenAvatars.noteAvatarId(avatarId);
 
   const isNewAvatarId = await avatar_id_store.checkAndMark(avatarId);
   if (!isNewAvatarId) return;

@@ -249,6 +249,22 @@ SOFTWARE.
                 z-index: 1050;
                 display: none;
             }
+
+            .log-report-btn {
+                width: auto !important;
+                margin: 0 0 0 10px !important;
+                padding: 0 8px;
+                font-size: 0.75rem;
+                vertical-align: baseline;
+            }
+
+            .avatar-open-btn {
+                width: auto !important;
+                margin: 0 !important;
+                padding: 0 8px;
+                font-size: 0.75rem;
+                vertical-align: baseline;
+            }
         </style>
     </head>
 
@@ -281,12 +297,34 @@ SOFTWARE.
                 <li class="nav-item">
                     <a
                         class="nav-link"
+                        id="avatars-tab"
+                        data-bs-toggle="tab"
+                        href="#avatars"
+                        role="tab"
+                    >
+                        <i class="bi bi-list-ul"></i> Avatars
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a
+                        class="nav-link"
                         id="settings-tab"
                         data-bs-toggle="tab"
                         href="#settings"
                         role="tab"
                     >
                         <i class="bi bi-gear"></i> Settings
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a
+                        class="nav-link"
+                        id="report-tab"
+                        data-bs-toggle="tab"
+                        href="#report"
+                        role="tab"
+                    >
+                        <i class="bi bi-flag"></i> Report
                     </a>
                 </li>
             </ul>
@@ -342,6 +380,28 @@ SOFTWARE.
                                         placeholder="Enter your Discord ID"
                                     />
                                 </div>
+                                <div class="form-check mb-3">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="sendIdWithLookups"
+                                    />
+                                    <label
+                                        class="form-check-label"
+                                        for="sendIdWithLookups"
+                                        >Send my Discord ID with avatar name
+                                        lookups</label
+                                    >
+                                    <div class="form-text text-secondary">
+                                        When on, your Discord ID is added to the
+                                        request that looks up an avatar's name
+                                        (every time new avatars appear in your
+                                        log), so the World Balancer team can see
+                                        which logger is asking. Reports always
+                                        include your Discord ID. Turn this off
+                                        to send it only with reports.
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -357,6 +417,124 @@ SOFTWARE.
                                         Save Settings
                                     </button>
                                 </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-pane fade" id="avatars" role="tabpanel">
+                    <div class="p-3 bg-dark border rounded border-secondary">
+                        <div
+                            class="d-flex flex-wrap gap-2 align-items-center mb-2"
+                        >
+                            <input
+                                type="search"
+                                class="form-control form-control-dark flex-grow-1"
+                                id="avatarFilter"
+                                placeholder="Filter by avatar name or ID"
+                                autocomplete="off"
+                                style="max-width: 420px"
+                            />
+                            <span
+                                class="text-secondary"
+                                id="avatarCount"
+                            ></span>
+                            <button
+                                type="button"
+                                class="btn btn-sm btn-outline-danger ms-auto"
+                                id="avatarClear"
+                            >
+                                Clear list
+                            </button>
+                        </div>
+                        <p class="text-secondary small">
+                            Every avatar ID found in your VRChat log, with its
+                            name. If the name shows as "Private", the avatar is
+                            private or no longer available. Press Report to send
+                            an avatar to the World Balancer team.
+                        </p>
+                        <div class="table-responsive">
+                            <table
+                                class="table table-dark table-sm align-middle mb-0"
+                            >
+                                <thead>
+                                    <tr>
+                                        <th>Avatar name / ID</th>
+                                        <th>Seen</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="avatarRows"></tbody>
+                            </table>
+                        </div>
+                        <p
+                            id="avatarEmpty"
+                            class="text-secondary text-center my-3"
+                        ></p>
+                    </div>
+                </div>
+
+                <div class="tab-pane fade" id="report" role="tabpanel">
+                    <div class="p-3 bg-dark border rounded border-secondary">
+                        <div class="card bg-dark text-white">
+                            <div class="card-header">Report an avatar</div>
+                            <div class="card-body">
+                                <p class="text-secondary">
+                                    Send an avatar to the World Balancer Team.
+                                    Your Discord ID from Settings is sent with
+                                    the report.
+                                </p>
+                                <div class="mb-3">
+                                    <label
+                                        for="reportAvatarId"
+                                        class="form-label"
+                                        >Avatar ID</label
+                                    >
+                                    <input
+                                        type="text"
+                                        class="form-control form-control-dark"
+                                        id="reportAvatarId"
+                                        placeholder="avtr_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                        autocomplete="off"
+                                        spellcheck="false"
+                                    />
+                                    <div
+                                        class="form-text text-secondary"
+                                        id="reportAvatarName"
+                                        hidden
+                                    ></div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="reportReason" class="form-label"
+                                        >Reason (optional)</label
+                                    >
+                                    <textarea
+                                        class="form-control form-control-dark"
+                                        id="reportReason"
+                                        rows="3"
+                                        maxlength="500"
+                                        placeholder="Why are you reporting this avatar?"
+                                    ></textarea>
+                                    <div
+                                        class="form-text text-secondary text-end"
+                                    >
+                                        <span id="reportReasonCount">0</span
+                                        >/500
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    class="btn btn-warning"
+                                    id="reportSubmit"
+                                >
+                                    <i class="bi bi-flag"></i> Send report
+                                </button>
+                                <div
+                                    id="reportStatus"
+                                    class="alert mt-3 mb-0"
+                                    role="alert"
+                                    hidden
+                                ></div>
                             </div>
                         </div>
                     </div>
@@ -425,6 +603,23 @@ SOFTWARE.
                         logElement.classList.add("log-warn");
 
                     logElement.textContent = logData.message;
+
+                    // "Found avatar ID: avtr_..." lines get a Report button
+                    const found = /^Found avatar ID: (avtr_[0-9a-f-]+)$/i.exec(
+                        logData.message,
+                    );
+                    if (found) {
+                        const reportBtn = document.createElement("button");
+                        reportBtn.type = "button";
+                        reportBtn.className =
+                            "btn btn-sm btn-outline-warning log-report-btn";
+                        reportBtn.textContent = "Report";
+                        reportBtn.addEventListener("click", () =>
+                            openReport(found[1]),
+                        );
+                        logElement.appendChild(reportBtn);
+                    }
+
                     logsDivMain.appendChild(logElement);
 
                     while (logsDivMain.childNodes.length > MAX_LOG_LINES) {
@@ -449,6 +644,8 @@ SOFTWARE.
             async function loadConfig() {
                 try {
                     const savedConfig = await window.api.loadConfig();
+                    document.getElementById("sendIdWithLookups").checked =
+                        savedConfig.Userid?.send_with_lookups === true;
 
                     Object.assign(
                         directoriesOptions,
@@ -484,6 +681,9 @@ SOFTWARE.
                     Directories: directoriesOptions,
                     Userid: {
                         discord_id: currentDiscordId,
+                        send_with_lookups:
+                            document.getElementById("sendIdWithLookups")
+                                .checked,
                     },
                 };
 
@@ -505,6 +705,358 @@ SOFTWARE.
             }
 
             init();
+        </script>
+
+        <script>
+            const AVATAR_ID_REGEX =
+                /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+            const reportAvatarInput = document.getElementById("reportAvatarId");
+            const reportReasonInput = document.getElementById("reportReason");
+            const reportReasonCount =
+                document.getElementById("reportReasonCount");
+            const reportSubmitBtn = document.getElementById("reportSubmit");
+            const reportStatus = document.getElementById("reportStatus");
+
+            function showReportStatus(kind, message) {
+                reportStatus.className = `alert alert-${kind} mt-3 mb-0`;
+                reportStatus.textContent = message; // text, never HTML
+                reportStatus.hidden = false;
+            }
+
+            // Called by the Report button on a log line: opens the Report tab
+            // with that avatar ID filled in.
+            function openReport(avatarId, avatarName) {
+                // A different avatar starts a fresh report: drop the old reason
+                if (
+                    reportAvatarInput.value.trim().toLowerCase() !==
+                    avatarId.toLowerCase()
+                ) {
+                    reportReasonInput.value = "";
+                    reportReasonCount.textContent = "0";
+                }
+                reportFormVersion++;
+                reportAvatarInput.value = avatarId;
+                reportStatus.hidden = true;
+                const nameHint = document.getElementById("reportAvatarName");
+                nameHint.textContent = avatarName
+                    ? `Avatar name: ${avatarName}`
+                    : "";
+                nameHint.hidden = !avatarName;
+                new bootstrap.Tab(document.getElementById("report-tab")).show();
+                reportReasonInput.focus();
+            }
+
+            // Changes whenever the form is edited or another report is opened.
+            // A submission applies its result to the form only if the version
+            // is still the one it was sent from.
+            let reportFormVersion = 0;
+            reportAvatarInput.addEventListener("input", () => {
+                reportFormVersion++;
+            });
+
+            reportReasonInput.addEventListener("input", () => {
+                reportFormVersion++;
+                reportReasonCount.textContent = reportReasonInput.value.length;
+            });
+
+            async function submitReport() {
+                const avatarId = reportAvatarInput.value.trim().toLowerCase();
+                const reason = reportReasonInput.value.trim();
+
+                if (!AVATAR_ID_REGEX.test(avatarId)) {
+                    showReportStatus(
+                        "warning",
+                        "Enter a valid avatar ID (avtr_ followed by a UUID).",
+                    );
+                    return;
+                }
+
+                const sentVersion = reportFormVersion;
+                reportSubmitBtn.disabled = true;
+                showReportStatus("secondary", "Sending report...");
+                try {
+                    const result = await window.api.reportAvatar(
+                        avatarId,
+                        reason,
+                    );
+                    // Remember the outcome for the avatar it was sent for
+                    if (result.ok || result.code === "duplicate") {
+                        reportedIds.add(avatarId);
+                        scheduleAvatarRender();
+                    }
+                    // The user moved on to another report: leave their form alone
+                    if (sentVersion === reportFormVersion) {
+                        const kind = result.ok
+                            ? "success"
+                            : result.code === "duplicate"
+                              ? "info"
+                              : "danger";
+                        showReportStatus(kind, result.message);
+                        if (result.ok) {
+                            document.getElementById("reportAvatarName").hidden =
+                                true;
+                            reportAvatarInput.value = "";
+                            reportReasonInput.value = "";
+                            reportReasonCount.textContent = "0";
+                        }
+                    }
+                } catch (error) {
+                    console.error("Report failed:", error);
+                    if (sentVersion === reportFormVersion) {
+                        showReportStatus(
+                            "danger",
+                            "The report could not be sent.",
+                        );
+                    }
+                } finally {
+                    reportSubmitBtn.disabled = false;
+                }
+            }
+
+            reportSubmitBtn.addEventListener("click", submitReport);
+        </script>
+
+        <script>
+            const seenAvatars = new Map(); // avatar id -> entry from the main process
+            const reportedIds = new Set(); // avatar ids reported from this window
+
+            const avatarRowsEl = document.getElementById("avatarRows");
+            const avatarFilterEl = document.getElementById("avatarFilter");
+            const avatarCountEl = document.getElementById("avatarCount");
+            const avatarEmptyEl = document.getElementById("avatarEmpty");
+            let avatarRenderTimer = null;
+
+            // Bursts of updates (joining a busy instance) become one redraw
+            function scheduleAvatarRender() {
+                if (avatarRenderTimer) return;
+                avatarRenderTimer = setTimeout(() => {
+                    avatarRenderTimer = null;
+                    renderAvatars();
+                }, 150);
+            }
+
+            // Ways to open an avatar from its ID
+            const AVATAR_OPEN_LINKS = [
+                {
+                    label: "VRChat",
+                    title: "Open on vrchat.com",
+                    url: (id) => `https://vrchat.com/home/avatar/${id}`,
+                },
+                {
+                    label: "VRCX",
+                    title: "Open in VRCX",
+                    url: (id) => `vrcx://avatar/${id}`,
+                },
+                {
+                    label: "VRCX-0",
+                    title: "Open in VRCX-0",
+                    url: (id) => `vrcx-0://avatar/open?id=${id}`,
+                },
+            ];
+
+            // Hands the link to the system (default browser, or the VRCX app).
+            async function openAvatarLink(url) {
+                try {
+                    if (typeof window.api.openExternal === "function") {
+                        await window.api.openExternal(url);
+                    } else {
+                        window.open(url, "_blank");
+                    }
+                } catch (error) {
+                    console.error("Could not open link:", error);
+                }
+            }
+
+            function makeOpenButtons(avatarId) {
+                const group = document.createElement("span");
+                group.className = "btn-group me-2";
+                group.setAttribute("role", "group");
+                for (const link of AVATAR_OPEN_LINKS) {
+                    const b = document.createElement("button");
+                    b.type = "button";
+                    b.className = "btn btn-sm btn-outline-info avatar-open-btn";
+                    b.textContent = link.label;
+                    b.title = link.title;
+                    b.addEventListener("click", () =>
+                        openAvatarLink(link.url(encodeURIComponent(avatarId))),
+                    );
+                    group.append(b);
+                }
+                return group;
+            }
+
+            function makeCell(text, className) {
+                const td = document.createElement("td");
+                if (className) td.className = className;
+                td.textContent = text;
+                return td;
+            }
+
+            function renderAvatars() {
+                const filter = avatarFilterEl.value.trim().toLowerCase();
+                const list = [...seenAvatars.values()]
+                    .sort((a, b) => b.lastSeen - a.lastSeen)
+                    .filter(
+                        (a) =>
+                            !filter ||
+                            [
+                                a.name,
+                                a.id,
+                                a.lookup === "private" ? "private" : null,
+                            ].some(
+                                (v) => v && v.toLowerCase().includes(filter),
+                            ),
+                    );
+
+                avatarRowsEl.replaceChildren();
+                for (const a of list) {
+                    const tr = document.createElement("tr");
+
+                    let nameText;
+                    let nameClass = "";
+                    let nameTitle = "";
+                    if (a.lookup === "found") {
+                        nameText = a.name;
+                        nameTitle = a.name; // full name on hover
+                    } else if (a.lookup === "private") {
+                        nameText = "Private";
+                        nameClass = "text-warning";
+                        nameTitle = "The avatar server said: Avatar not found";
+                    } else if (a.lookup === "error") {
+                        nameText = "Lookup failed";
+                        nameClass = "text-danger";
+                        nameTitle = a.error || "";
+                    } else {
+                        nameText = "Looking up...";
+                        nameClass = "text-secondary";
+                    }
+                    // Name on top, the ID small underneath (one column, so the
+                    // Report button always stays visible)
+                    const nameCell = document.createElement("td");
+                    // The name column takes only the space the time and the
+                    // buttons leave, and a long name is cut with "..." (full
+                    // name on hover), so the buttons never leave the window.
+                    // (width 100% + max-width 0 is what makes a table cell shrink)
+                    nameCell.style.width = "100%";
+                    nameCell.style.maxWidth = "0";
+                    const nameLine = document.createElement("div");
+                    nameLine.style.overflow = "hidden";
+                    nameLine.style.textOverflow = "ellipsis";
+                    nameLine.style.whiteSpace = "nowrap";
+                    nameLine.textContent = nameText;
+                    if (nameClass) nameLine.className = nameClass;
+                    if (nameTitle) nameLine.title = nameTitle;
+                    const idLine = document.createElement("div");
+                    idLine.className = "font-monospace text-secondary";
+                    idLine.style.fontSize = "0.72rem";
+                    idLine.style.userSelect = "all";
+                    idLine.textContent = a.id;
+                    nameCell.append(nameLine, idLine);
+                    const timeCell = makeCell(
+                        new Date(a.lastSeen).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                        }),
+                        "small text-secondary text-nowrap",
+                    );
+                    tr.append(nameCell, timeCell);
+
+                    const actionCell = document.createElement("td");
+                    if (a.lookup === "error" || a.lookup === "private") {
+                        const retry = document.createElement("button");
+                        retry.type = "button";
+                        retry.className =
+                            "btn btn-sm btn-outline-secondary me-2";
+                        retry.textContent = "Retry";
+                        retry.addEventListener("click", async () => {
+                            retry.disabled = true;
+                            try {
+                                await window.api.retryAvatarLookup(a.id);
+                            } catch (error) {
+                                console.error("Retry failed:", error);
+                                retry.disabled = false;
+                            }
+                        });
+                        actionCell.append(retry);
+                    }
+                    actionCell.append(makeOpenButtons(a.id));
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.className =
+                        "btn btn-sm btn-outline-warning log-report-btn";
+                    btn.textContent = "Report";
+                    btn.addEventListener("click", () =>
+                        openReport(a.id, a.lookup === "found" ? a.name : null),
+                    );
+                    actionCell.append(btn);
+                    if (reportedIds.has(a.id)) {
+                        const done = document.createElement("span");
+                        done.className = "text-success ms-2 small";
+                        done.textContent = "Reported";
+                        actionCell.append(done);
+                    }
+                    tr.append(actionCell);
+                    avatarRowsEl.append(tr);
+                }
+
+                avatarCountEl.textContent = seenAvatars.size
+                    ? `${list.length} of ${seenAvatars.size}`
+                    : "";
+                avatarEmptyEl.hidden = list.length > 0;
+                avatarEmptyEl.textContent = seenAvatars.size
+                    ? "No avatars match the filter."
+                    : "No avatars seen yet. They appear here while VRChat is running.";
+            }
+
+            avatarFilterEl.addEventListener("input", renderAvatars);
+            document
+                .getElementById("avatarClear")
+                .addEventListener("click", async () => {
+                    seenAvatars.clear();
+                    renderAvatars();
+                    try {
+                        await window.api.clearSeenAvatars();
+                    } catch (error) {
+                        console.error("Failed to clear the list:", error);
+                    }
+                });
+
+            async function initAvatarList() {
+                // Updates are applied by avatar id, so one that arrives while the
+                // full list is still loading is never lost or doubled.
+                // The snapshot from getSeenAvatars() can be older than events that
+                // arrive while it is in transit: those events win over it.
+                const liveIds = new Set(); // ids touched by a live event
+                let liveCleared = false; // the list was cleared meanwhile
+                window.api.onSeenAvatarsUpdate((msg) => {
+                    if (msg.type === "clear") {
+                        liveCleared = true;
+                        seenAvatars.clear();
+                    } else if (msg.type === "remove") {
+                        liveIds.add(msg.id);
+                        seenAvatars.delete(msg.id);
+                    } else if (msg.type === "upsert" && msg.avatar) {
+                        liveIds.add(msg.avatar.id);
+                        seenAvatars.set(msg.avatar.id, msg.avatar);
+                    }
+                    scheduleAvatarRender();
+                });
+
+                try {
+                    const list = await window.api.getSeenAvatars();
+                    if (!liveCleared) {
+                        for (const a of list) {
+                            if (!liveIds.has(a.id)) seenAvatars.set(a.id, a);
+                        }
+                    }
+                } catch (error) {
+                    console.error("Failed to load seen avatars:", error);
+                }
+                renderAvatars();
+            }
+
+            initAvatarList();
         </script>
     </body>
 </html>

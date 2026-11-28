@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs").promises;
 const fsSync = require("fs");
@@ -113,6 +113,8 @@ function getDefaultConfig() {
     Directories: { LogDirectory: logDirectory },
     Userid: {
       discord_id: "",
+      // Add the Discord ID to avatar-name lookups (disclosed in Settings)
+      send_with_lookups: true,
     },
   });
 }
@@ -189,11 +191,19 @@ function log(message, level = "info", type = "main_log") {
   }
 }
 
+// Sends something to the window (no-op while it is closed or still loading;
+// the window asks for the full state when it opens).
+function sendToWindow(channel, data) {
+  if (mainWindow && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send(channel, data);
+  }
+}
+
 function initAppWindow() {
   if (mainWindow) return;
 
   mainWindow = new BrowserWindow({
-    width: 800,
+    width: 825,
     height: 825,
     icon: path.join(__dirname, "assets", "icon.png"),
     webPreferences: {
@@ -223,7 +233,53 @@ ipcMain.handle(
   "save-config",
   async (_, config) => await saveConfigRecursively(config),
 );
+
+// Avatar links from the Avatars tab: only these exact avatar URLs are opened.
+const OPEN_EXTERNAL_ALLOWED =
+  /^(https:\/\/vrchat\.com\/home\/avatar\/|vrcx:\/\/avatar\/|vrcx-0:\/\/avatar\/open\?id=)avtr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+ipcMain.handle("open-external", async (_, url) => {
+  if (typeof url !== "string" || !OPEN_EXTERNAL_ALLOWED.test(url)) return false;
+  try {
+    await shell.openExternal(url);
+    return true;
+  } catch (err) {
+    log(`Could not open link: ${err.message}`, "warn");
+    return false;
+  }
+});
 ipcMain.handle("get-app-version", () => version);
+
+// Avatars tab: the list kept by seenAvatars.js (required lazily, see below).
+ipcMain.handle("get-seen-avatars", () =>
+  require("./avilogger/seenAvatars.js").getSeenAvatars(),
+);
+ipcMain.handle("clear-seen-avatars", () =>
+  require("./avilogger/seenAvatars.js").clearSeenAvatars(),
+);
+
+ipcMain.handle("retry-avatar-lookup", (_, id) =>
+  typeof id === "string"
+    ? require("./avilogger/seenAvatars.js").retryLookup(id)
+    : false,
+);
+
+// "Report" button: the window asks, reportQueue.js sends it to the reports API.
+// Required lazily because reportQueue requires this module (same reason as the
+// avatarQueue require in before-quit below).
+ipcMain.handle("report-avatar", async (_, payload) => {
+  try {
+    const { submitReport } = require("./avilogger/reportQueue.js");
+    return await submitReport(payload?.avatarId, payload?.reason);
+  } catch (err) {
+    console.error("report-avatar failed:", err.message);
+    return {
+      ok: false,
+      code: "error",
+      message: "The report could not be sent.",
+    };
+  }
+});
 
 app.on("ready", async () => {
   // Folder problems found while choosing the data folder (unavailable
@@ -266,7 +322,9 @@ app.on("before-quit", (event) => {
     // Required lazily: avatarQueue requires this module, so a top-level
     // require here would hand it a half-loaded `main`.
     const { waitForIdle } = require("./avilogger/avatarQueue.js");
-    await waitForIdle(3000);
+    const reports = require("./avilogger/reportQueue.js");
+    // A report the person just sent must not be cut off either
+    await Promise.all([waitForIdle(3000), reports.waitForIdle(3000)]);
     await avatar_id_store.flushAll();
   })();
 
@@ -284,4 +342,4 @@ app.on("before-quit", (event) => {
     });
 });
 
-module.exports = { log };
+module.exports = { log, sendToWindow };
