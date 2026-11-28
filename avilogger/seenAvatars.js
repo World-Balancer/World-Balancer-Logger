@@ -111,6 +111,8 @@ function recheckPrivate(entry) {
 /** An avatar ID was seen in the log. */
 function noteAvatarId(id, now = Date.now()) {
   try {
+    if (typeof id !== "string") return;
+    id = id.toLowerCase(); // one row per avatar, whatever the casing in the log
     let entry = entries.get(id);
     if (!entry) {
       entry = {
@@ -146,6 +148,8 @@ function noteAvatarId(id, now = Date.now()) {
 /** Asks the server again (Retry button, or to see if a private avatar went public). */
 function retryLookup(id) {
   try {
+    if (typeof id !== "string") return false;
+    id = id.toLowerCase();
     const entry = entries.get(id);
     if (!entry || entry.lookup === "loading") return false;
     forgetAvatar(id);

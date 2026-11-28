@@ -380,6 +380,28 @@ SOFTWARE.
                                         placeholder="Enter your Discord ID"
                                     />
                                 </div>
+                                <div class="form-check mb-3">
+                                    <input
+                                        class="form-check-input"
+                                        type="checkbox"
+                                        id="sendIdWithLookups"
+                                    />
+                                    <label
+                                        class="form-check-label"
+                                        for="sendIdWithLookups"
+                                        >Send my Discord ID with avatar name
+                                        lookups</label
+                                    >
+                                    <div class="form-text text-secondary">
+                                        When on, your Discord ID is added to the
+                                        request that looks up an avatar's name
+                                        (every time new avatars appear in your
+                                        log), so the World Balancer team can see
+                                        which logger is asking. Reports always
+                                        include your Discord ID. Turn this off
+                                        to send it only with reports.
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -622,6 +644,8 @@ SOFTWARE.
             async function loadConfig() {
                 try {
                     const savedConfig = await window.api.loadConfig();
+                    document.getElementById("sendIdWithLookups").checked =
+                        savedConfig.Userid?.send_with_lookups === true;
 
                     Object.assign(
                         directoriesOptions,
@@ -657,6 +681,9 @@ SOFTWARE.
                     Directories: directoriesOptions,
                     Userid: {
                         discord_id: currentDiscordId,
+                        send_with_lookups:
+                            document.getElementById("sendIdWithLookups")
+                                .checked,
                     },
                 };
 
@@ -701,7 +728,10 @@ SOFTWARE.
             // with that avatar ID filled in.
             function openReport(avatarId, avatarName) {
                 // A different avatar starts a fresh report: drop the old reason
-                if (reportAvatarInput.value.trim() !== avatarId) {
+                if (
+                    reportAvatarInput.value.trim().toLowerCase() !==
+                    avatarId.toLowerCase()
+                ) {
                     reportReasonInput.value = "";
                     reportReasonCount.textContent = "0";
                 }
@@ -731,7 +761,7 @@ SOFTWARE.
             });
 
             async function submitReport() {
-                const avatarId = reportAvatarInput.value.trim();
+                const avatarId = reportAvatarInput.value.trim().toLowerCase();
                 const reason = reportReasonInput.value.trim();
 
                 if (!AVATAR_ID_REGEX.test(avatarId)) {

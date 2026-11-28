@@ -43,7 +43,7 @@ const main = require("../main");
 const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
 const { parseRetryAfterMs } = require("./avatarQueue.js");
-const { readDiscordId } = require("./discordId.js");
+const { readLookupDiscordId } = require("./discordId.js");
 
 const LOOKUP_URL = "https://avatarwbvrcxsearch.worldbalancer.com/vrc_avatar";
 
@@ -90,12 +90,13 @@ const axiosInstance = axios.create({
 });
 
 // The User-Agent of one request: "app/version email discord:<id>". The Discord
-// ID (the person running the logger) is read each time, so a change in Settings
-// is picked up; without a valid ID the plain "app/version email" is sent.
+// ID (the person running the logger) is added only when Settings allows it
+// ("Send my Discord ID with name lookups") and is read each time, so a change
+// applies at once. Otherwise the plain "app/version email" is sent.
 async function userAgent() {
   const base = `WorldBalancer/${version} contact@worldbalancer.com`;
   try {
-    const discordId = await readDiscordId();
+    const discordId = await readLookupDiscordId();
     return discordId ? `${base} discord:${discordId}` : base;
   } catch {
     return base;
@@ -155,7 +156,7 @@ function readFound(res, id) {
 }
 
 function isTemporary(status) {
-  return status === 429 || (status >= 500 && status <= 599);
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
 
 // Turns one HTTP answer into { done: result } or { error, retry?, waitMs? }.
@@ -287,6 +288,9 @@ function clearLookupQueue() {
     inflight.delete(job.id);
     job.resolve({ status: "error", message: "Cancelled." });
   }
+  // A lookup already on its way must not be shared with an avatar that is seen
+  // again after the clear: its result belongs to the cleared list.
+  inflight.clear();
 }
 
 /**
@@ -299,6 +303,8 @@ function lookupAvatar(id) {
       message: "Not a valid avatar ID.",
     });
   }
+
+  id = id.toLowerCase(); // one key per avatar, whatever the casing in the log
 
   const hit = cache.get(id);
   if (hit && hit.expires > Date.now()) return Promise.resolve(hit.result);
@@ -315,7 +321,9 @@ function lookupAvatar(id) {
 
   const promise = new Promise((resolve) => queue.push({ id, resolve }));
   inflight.set(id, promise);
-  promise.then(() => inflight.delete(id));
+  promise.then(() => {
+    if (inflight.get(id) === promise) inflight.delete(id);
+  });
   runWorker();
   return promise;
 }

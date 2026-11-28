@@ -24,32 +24,45 @@ SOFTWARE.
 
 // The Discord ID of the person running the logger, shared by the avatar
 // lookups (User-Agent) and the reports (request body).
+//
+// NOTE: this ID is typed in by the user and never verified. The server must
+// treat it as a label, not as proof of who sent a request.
+//
+// Settings are read straight from the config table on every call (no cache),
+// so a change in Settings applies at once, and a database failure is thrown
+// instead of looking like "not set".
 
-const getConfig = require("../models/getConfig");
+const Config = require("../models/Config");
 const { normalizeDiscordId } = require("./avatarQueue.js");
 
 const DISCORD_ID_REGEX = /^\d{17,20}$/;
 
-// The ID as last saved in Settings. getConfig caches for a few seconds, so the
-// Settings save handler calls noteDiscordIdSaved() to skip that cache.
-let savedDiscordId; // undefined = not saved since start, use getConfig
+// One saved setting (null when it was never saved). Rejects when the database
+// cannot be read.
+async function readSetting(key) {
+  const row = await Config.findOne({ where: { keyid: key } });
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return null;
+  }
+}
 
-function noteDiscordIdSaved(id) {
-  savedDiscordId = id;
+/** The Discord ID, or null when none is set or it is not 17-20 digits. */
+async function readDiscordId() {
+  const raw = await readSetting("Userid.discord_id");
+  const id = normalizeDiscordId(raw == null ? raw : String(raw));
+  return id && DISCORD_ID_REGEX.test(id) ? id : null;
 }
 
 /**
- * The Discord ID, or null when none is set or it is not 17-20 digits.
- * Read each time: the user may have changed it in Settings meanwhile.
- * Rejects when the setting cannot be read.
+ * The Discord ID to add to avatar-name lookups, or null when the person has
+ * not allowed that (Settings: "Send my Discord ID with name lookups").
  */
-async function readDiscordId() {
-  const discordId = normalizeDiscordId(
-    savedDiscordId !== undefined
-      ? savedDiscordId
-      : await getConfig("Userid.discord_id"),
-  );
-  return discordId && DISCORD_ID_REGEX.test(discordId) ? discordId : null;
+async function readLookupDiscordId() {
+  const allowed = await readSetting("Userid.send_with_lookups");
+  return allowed === true ? readDiscordId() : null;
 }
 
-module.exports = { readDiscordId, noteDiscordIdSaved };
+module.exports = { readDiscordId, readLookupDiscordId };

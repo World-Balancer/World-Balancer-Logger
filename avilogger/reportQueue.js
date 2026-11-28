@@ -33,10 +33,7 @@ const main = require("../main");
 const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
 const { retryWaitMs, parseRetryAfterMs } = require("./avatarQueue.js");
-const {
-  readDiscordId: readSavedDiscordId,
-  noteDiscordIdSaved,
-} = require("./discordId.js");
+const { readDiscordId } = require("./discordId.js");
 
 const REPORT_URL = "https://avatarwbvrcxsearch.worldbalancer.com/reports";
 
@@ -103,6 +100,7 @@ function isRetryable(err) {
   const status = err.response?.status;
   return (
     NETWORK_ERROR_CODES.has(err.code) ||
+    status === 408 ||
     status === 429 ||
     (status >= 500 && status <= 599)
   );
@@ -137,7 +135,8 @@ function validateReportInput(avatarId, reason) {
       error: `The reason is too long (${cleanReason.length}/${MAX_REASON_LENGTH} characters).`,
     };
   }
-  return { avatarId: avatarId.trim(), reason: cleanReason };
+  // Lower case, so the same avatar never gets two keys or two reports
+  return { avatarId: avatarId.trim().toLowerCase(), reason: cleanReason };
 }
 
 // Turns a failed request into the message shown in the window.
@@ -155,7 +154,7 @@ function failureResult(err) {
   } else if (status === 429) {
     code = "busy";
     message = "The server is busy. Try again in a minute.";
-  } else if (status >= 500 && status <= 599) {
+  } else if (status === 408 || (status >= 500 && status <= 599)) {
     code = "server";
     message = "The report server is having problems. Try again later.";
   } else if (!err?.response && NETWORK_ERROR_CODES.has(err?.code)) {
@@ -170,15 +169,13 @@ function failureResult(err) {
   return { ok: false, code, message };
 }
 
-// The Discord ID to send, or null when none is set or it is not valid.
-// Read each time: the user may have changed it in Settings meanwhile.
-async function readDiscordId() {
-  try {
-    return await readSavedDiscordId();
-  } catch (err) {
-    reportError(`[Report] Could not read Userid.discord_id: ${err.message}`);
-    return null;
-  }
+function configErrorResult() {
+  return {
+    ok: false,
+    code: "config_error",
+    message:
+      "Your settings could not be read. Try again, or restart the app if it keeps happening.",
+  };
 }
 
 function noDiscordIdResult() {
@@ -212,16 +209,16 @@ function createdResult(avatarId, reportId, note = "") {
 
 // The server already has an open report from this user for this avatar.
 function conflictResult(avatarId, maybeSent) {
-  if (maybeSent) {
-    // Our own earlier attempt was stored and only its answer got lost,
-    // so this 409 is that report, not an older one.
-    return createdResult(avatarId, null, " (confirmed on retry)");
-  }
   logToMain(`[Report] Already reported: ${avatarId}`);
+  // The server cannot tell us whether the open report came from this very
+  // submission or an older one, so never claim "sent" here. After an unclear
+  // failure it is likely the one we just sent: say that it is on file.
   return {
     ok: false,
     code: "duplicate",
-    message: "You already have an open report for this avatar.",
+    message: maybeSent
+      ? "Your report for this avatar is already on file (it may have been received a moment ago)."
+      : "You already have an open report for this avatar.",
   };
 }
 
@@ -248,7 +245,13 @@ function planRetry(err, attempt) {
 }
 
 async function sendReport({ avatarId, reason }) {
-  const discordId = await readDiscordId();
+  let discordId;
+  try {
+    discordId = await readDiscordId(); // read each time: Settings may have changed
+  } catch (err) {
+    reportError(`[Report] Could not read Userid.discord_id: ${err.message}`);
+    return configErrorResult();
+  }
   if (!discordId) return noDiscordIdResult();
 
   const body = buildReportBody(avatarId, discordId, reason);
@@ -318,7 +321,7 @@ async function runWorker() {
  * Sends a report for an avatar ID. Never rejects; always resolves to
  *   { ok: true,  code: "created",  reportId, message }
  *   { ok: false, code, message }
- * where code is one of: "invalid", "no_discord_id", "duplicate", "rejected",
+ * where code is one of: "invalid", "no_discord_id", "config_error", "duplicate", "rejected",
  * "denied", "busy", "server", "network", "error".
  * Clicking twice on the same avatar while it is still being sent shares one
  * request and one answer.
@@ -364,4 +367,15 @@ function submitReport(avatarId, reason) {
   return promise;
 }
 
-module.exports = { submitReport, validateReportInput, noteDiscordIdSaved };
+/**
+ * Resolves when no report is queued or being sent, or after timeoutMs.
+ * Used before quitting so a report the person just sent is not cut off.
+ */
+async function waitForIdle(timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while ((running || queue.length > 0) && Date.now() < deadline) {
+    await sleep(100);
+  }
+}
+
+module.exports = { submitReport, validateReportInput, waitForIdle };

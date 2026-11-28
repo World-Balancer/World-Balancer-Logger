@@ -113,6 +113,8 @@ function getDefaultConfig() {
     Directories: { LogDirectory: logDirectory },
     Userid: {
       discord_id: "",
+      // Add the Discord ID to avatar-name lookups (disclosed in Settings)
+      send_with_lookups: true,
     },
   });
 }
@@ -227,20 +229,10 @@ function initAppWindow() {
 
 ipcMain.handle("get-user-data-path", () => getDataDir());
 ipcMain.handle("load-config", loadConfig);
-ipcMain.handle("save-config", async (_, config) => {
-  await saveConfigRecursively(config);
-
-  // getConfig caches for a few seconds: tell the Discord ID holder about the new
-  // value so reports and lookups sent right after saving use the new one.
-  const discordId = config?.Userid?.discord_id;
-  if (typeof discordId === "string") {
-    try {
-      require("./avilogger/discordId.js").noteDiscordIdSaved(discordId);
-    } catch (err) {
-      console.error("noteDiscordIdSaved failed:", err.message);
-    }
-  }
-});
+ipcMain.handle(
+  "save-config",
+  async (_, config) => await saveConfigRecursively(config),
+);
 
 // Avatar links from the Avatars tab: only these exact avatar URLs are opened.
 const OPEN_EXTERNAL_ALLOWED =
@@ -330,7 +322,9 @@ app.on("before-quit", (event) => {
     // Required lazily: avatarQueue requires this module, so a top-level
     // require here would hand it a half-loaded `main`.
     const { waitForIdle } = require("./avilogger/avatarQueue.js");
-    await waitForIdle(3000);
+    const reports = require("./avilogger/reportQueue.js");
+    // A report the person just sent must not be cut off either
+    await Promise.all([waitForIdle(3000), reports.waitForIdle(3000)]);
     await avatar_id_store.flushAll();
   })();
 
