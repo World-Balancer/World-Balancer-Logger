@@ -30,14 +30,13 @@ SOFTWARE.
 const axios = require("axios");
 const https = require("https");
 const main = require("../main");
-const getConfig = require("../models/getConfig");
 const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
+const { retryWaitMs, parseRetryAfterMs } = require("./avatarQueue.js");
 const {
-  normalizeDiscordId,
-  retryWaitMs,
-  parseRetryAfterMs,
-} = require("./avatarQueue.js");
+  readDiscordId: readSavedDiscordId,
+  noteDiscordIdSaved,
+} = require("./discordId.js");
 
 const REPORT_URL = "https://avatarwbvrcxsearch.worldbalancer.com/reports";
 
@@ -49,7 +48,6 @@ const MAX_PENDING = 10; // reports waiting behind the one being sent
 
 const AVATAR_ID_REGEX =
   /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DISCORD_ID_REGEX = /^\d{17,20}$/;
 
 const NETWORK_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -66,14 +64,6 @@ const NOT_SENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
 const MAX_SERVER_PAUSE_MS = 10 * 60 * 1000; // ceiling for a server Retry-After
 
 let pausedUntil = 0; // set by 429 / Retry-After: no report goes out before this
-
-// The Discord ID as last saved in Settings. getConfig caches for a few seconds,
-// so the Settings save handler calls noteDiscordIdSaved() to skip that cache.
-let savedDiscordId; // undefined = not saved since start, use getConfig
-
-function noteDiscordIdSaved(id) {
-  savedDiscordId = id;
-}
 
 function isAmbiguousFailure(err) {
   const status = err.response?.status;
@@ -183,17 +173,12 @@ function failureResult(err) {
 // The Discord ID to send, or null when none is set or it is not valid.
 // Read each time: the user may have changed it in Settings meanwhile.
 async function readDiscordId() {
-  let discordId = null;
   try {
-    discordId = normalizeDiscordId(
-      savedDiscordId !== undefined
-        ? savedDiscordId
-        : await getConfig("Userid.discord_id"),
-    );
+    return await readSavedDiscordId();
   } catch (err) {
     reportError(`[Report] Could not read Userid.discord_id: ${err.message}`);
+    return null;
   }
-  return discordId && DISCORD_ID_REGEX.test(discordId) ? discordId : null;
 }
 
 function noDiscordIdResult() {

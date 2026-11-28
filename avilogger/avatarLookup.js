@@ -43,6 +43,7 @@ const main = require("../main");
 const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
 const { parseRetryAfterMs } = require("./avatarQueue.js");
+const { readDiscordId } = require("./discordId.js");
 
 const LOOKUP_URL = "https://avatarwbvrcxsearch.worldbalancer.com/vrc_avatar";
 
@@ -87,6 +88,19 @@ const axiosInstance = axios.create({
     "User-Agent": `WorldBalancer/${version} contact@worldbalancer.com`,
   },
 });
+
+// The User-Agent of one request: "app/version email discord:<id>". The Discord
+// ID (the person running the logger) is read each time, so a change in Settings
+// is picked up; without a valid ID the plain "app/version email" is sent.
+async function userAgent() {
+  const base = `WorldBalancer/${version} contact@worldbalancer.com`;
+  try {
+    const discordId = await readDiscordId();
+    return discordId ? `${base} discord:${discordId}` : base;
+  } catch {
+    return base;
+  }
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -163,9 +177,12 @@ function interpret(res, id) {
 
 // One request. Resolves to { done: result }, or { error, retry?, waitMs? }.
 async function requestOnce(id) {
+  const headers = { "User-Agent": await userAgent() };
   let res;
   try {
-    res = await axiosInstance.get(`${LOOKUP_URL}/${encodeURIComponent(id)}`);
+    res = await axiosInstance.get(`${LOOKUP_URL}/${encodeURIComponent(id)}`, {
+      headers,
+    });
   } catch (err) {
     return {
       error: `could not reach the avatar server (${err.code || err.message})`,

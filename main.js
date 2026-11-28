@@ -230,13 +230,12 @@ ipcMain.handle("load-config", loadConfig);
 ipcMain.handle("save-config", async (_, config) => {
   await saveConfigRecursively(config);
 
-  // getConfig caches for a few seconds: tell the report sender about the new
-  // Discord ID so a report sent right after saving is not attributed to the old
-  // one. Required lazily because reportQueue requires this module.
+  // getConfig caches for a few seconds: tell the Discord ID holder about the new
+  // value so reports and lookups sent right after saving use the new one.
   const discordId = config?.Userid?.discord_id;
   if (typeof discordId === "string") {
     try {
-      require("./avilogger/reportQueue.js").noteDiscordIdSaved(discordId);
+      require("./avilogger/discordId.js").noteDiscordIdSaved(discordId);
     } catch (err) {
       console.error("noteDiscordIdSaved failed:", err.message);
     }
