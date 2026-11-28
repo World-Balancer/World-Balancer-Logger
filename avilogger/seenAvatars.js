@@ -41,7 +41,7 @@ const {
   clearLookupQueue,
 } = require("./avatarLookup.js");
 
-const MAX_ENTRIES = 300;
+const MAX_ENTRIES = 900;
 // A private avatar may be made public later; look again when it is seen after this
 const PRIVATE_RECHECK_MS = 30 * 60 * 1000;
 
