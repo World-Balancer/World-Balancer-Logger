@@ -257,6 +257,14 @@ SOFTWARE.
                 font-size: 0.75rem;
                 vertical-align: baseline;
             }
+
+            .avatar-open-btn {
+                width: auto !important;
+                margin: 0 !important;
+                padding: 0 8px;
+                font-size: 0.75rem;
+                vertical-align: baseline;
+            }
         </style>
     </head>
 
@@ -798,6 +806,56 @@ SOFTWARE.
                 }, 150);
             }
 
+            // Ways to open an avatar from its ID
+            const AVATAR_OPEN_LINKS = [
+                {
+                    label: "VRChat",
+                    title: "Open on vrchat.com",
+                    url: (id) => `https://vrchat.com/home/avatar/${id}`,
+                },
+                {
+                    label: "VRCX",
+                    title: "Open in VRCX",
+                    url: (id) => `vrcx://avatar/${id}`,
+                },
+                {
+                    label: "VRCX-0",
+                    title: "Open in VRCX-0",
+                    url: (id) => `vrcx-0://avatar/open?id=${id}`,
+                },
+            ];
+
+            // Hands the link to the system (default browser, or the VRCX app).
+            async function openAvatarLink(url) {
+                try {
+                    if (typeof window.api.openExternal === "function") {
+                        await window.api.openExternal(url);
+                    } else {
+                        window.open(url, "_blank");
+                    }
+                } catch (error) {
+                    console.error("Could not open link:", error);
+                }
+            }
+
+            function makeOpenButtons(avatarId) {
+                const group = document.createElement("span");
+                group.className = "btn-group me-2";
+                group.setAttribute("role", "group");
+                for (const link of AVATAR_OPEN_LINKS) {
+                    const b = document.createElement("button");
+                    b.type = "button";
+                    b.className = "btn btn-sm btn-outline-info avatar-open-btn";
+                    b.textContent = link.label;
+                    b.title = link.title;
+                    b.addEventListener("click", () =>
+                        openAvatarLink(link.url(encodeURIComponent(avatarId))),
+                    );
+                    group.append(b);
+                }
+                return group;
+            }
+
             function makeCell(text, className) {
                 const td = document.createElement("td");
                 if (className) td.className = className;
@@ -883,6 +941,7 @@ SOFTWARE.
                         });
                         actionCell.append(retry);
                     }
+                    actionCell.append(makeOpenButtons(a.id));
                     const btn = document.createElement("button");
                     btn.type = "button";
                     btn.className =

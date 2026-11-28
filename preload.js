@@ -52,6 +52,10 @@ contextBridge.exposeInMainWorld("api", {
   reportAvatar: (avatarId, reason) =>
     ipcRenderer.invoke("report-avatar", { avatarId, reason }),
 
+  // Opens an avatar link (vrchat.com, vrcx://, vrcx-0://) with the system.
+  // The main process only accepts those avatar URLs. Resolves to true/false.
+  openExternal: (url) => ipcRenderer.invoke("open-external", url),
+
   // Log communication from Renderer -> Main Process
   sendLogMessage: (type, message) =>
     ipcRenderer.send("send-log", { type, message }),

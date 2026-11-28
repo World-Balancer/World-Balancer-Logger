@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs").promises;
 const fsSync = require("fs");
@@ -227,10 +227,36 @@ function initAppWindow() {
 
 ipcMain.handle("get-user-data-path", () => getDataDir());
 ipcMain.handle("load-config", loadConfig);
-ipcMain.handle(
-  "save-config",
-  async (_, config) => await saveConfigRecursively(config),
-);
+ipcMain.handle("save-config", async (_, config) => {
+  await saveConfigRecursively(config);
+
+  // getConfig caches for a few seconds: tell the report sender about the new
+  // Discord ID so a report sent right after saving is not attributed to the old
+  // one. Required lazily because reportQueue requires this module.
+  const discordId = config?.Userid?.discord_id;
+  if (typeof discordId === "string") {
+    try {
+      require("./avilogger/reportQueue.js").noteDiscordIdSaved(discordId);
+    } catch (err) {
+      console.error("noteDiscordIdSaved failed:", err.message);
+    }
+  }
+});
+
+// Avatar links from the Avatars tab: only these exact avatar URLs are opened.
+const OPEN_EXTERNAL_ALLOWED =
+  /^(https:\/\/vrchat\.com\/home\/avatar\/|vrcx:\/\/avatar\/|vrcx-0:\/\/avatar\/open\?id=)avtr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+ipcMain.handle("open-external", async (_, url) => {
+  if (typeof url !== "string" || !OPEN_EXTERNAL_ALLOWED.test(url)) return false;
+  try {
+    await shell.openExternal(url);
+    return true;
+  } catch (err) {
+    log(`Could not open link: ${err.message}`, "warn");
+    return false;
+  }
+});
 ipcMain.handle("get-app-version", () => version);
 
 // Avatars tab: the list kept by seenAvatars.js (required lazily, see below).
