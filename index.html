@@ -888,6 +888,7 @@ SOFTWARE.
                     let nameTitle = "";
                     if (a.lookup === "found") {
                         nameText = a.name;
+                        nameTitle = a.name; // full name on hover
                     } else if (a.lookup === "private") {
                         nameText = "Private";
                         nameClass = "text-warning";
@@ -903,8 +904,16 @@ SOFTWARE.
                     // Name on top, the ID small underneath (one column, so the
                     // Report button always stays visible)
                     const nameCell = document.createElement("td");
-                    nameCell.style.wordBreak = "break-word";
+                    // The name column takes only the space the time and the
+                    // buttons leave, and a long name is cut with "..." (full
+                    // name on hover), so the buttons never leave the window.
+                    // (width 100% + max-width 0 is what makes a table cell shrink)
+                    nameCell.style.width = "100%";
+                    nameCell.style.maxWidth = "0";
                     const nameLine = document.createElement("div");
+                    nameLine.style.overflow = "hidden";
+                    nameLine.style.textOverflow = "ellipsis";
+                    nameLine.style.whiteSpace = "nowrap";
                     nameLine.textContent = nameText;
                     if (nameClass) nameLine.className = nameClass;
                     if (nameTitle) nameLine.title = nameTitle;
