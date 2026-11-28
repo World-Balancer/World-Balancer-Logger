@@ -34,6 +34,11 @@ const { log_error } = require("../functions/logsclass.js");
 const { version } = require("../package.json");
 const { retryWaitMs, parseRetryAfterMs } = require("./avatarQueue.js");
 const { readDiscordId } = require("./discordId.js");
+const {
+  hasUnconfirmed,
+  markUnconfirmed,
+  clearUnconfirmed,
+} = require("./pendingReports.js");
 
 const REPORT_URL = "https://avatarwbvrcxsearch.worldbalancer.com/reports";
 
@@ -211,13 +216,14 @@ function createdResult(avatarId, reportId, note = "") {
 function conflictResult(avatarId, maybeSent) {
   logToMain(`[Report] Already reported: ${avatarId}`);
   // The server cannot tell us whether the open report came from this very
-  // submission or an older one, so never claim "sent" here. After an unclear
-  // failure it is likely the one we just sent: say that it is on file.
+  // submission or an older one, so never claim "sent" here. After an earlier
+  // attempt that never got an answer (also from before a restart) it is most
+  // likely that one: say that it is on file.
   return {
     ok: false,
     code: "duplicate",
     message: maybeSent
-      ? "Your report for this avatar is already on file (it may have been received a moment ago)."
+      ? "Your report for this avatar is already on file (an earlier attempt was interrupted, so this is most likely it)."
       : "You already have an open report for this avatar.",
   };
 }
@@ -255,17 +261,36 @@ async function sendReport({ avatarId, reason }) {
   if (!discordId) return noDiscordIdResult();
 
   const body = buildReportBody(avatarId, discordId, reason);
+  const key = `${discordId}:${avatarId}`;
+  const earlierUnconfirmed = hasUnconfirmed(key); // maybe from before a restart
+  markUnconfirmed(key); // on disk before the request goes out
+
+  const { result, unsure } = await postWithRetries(
+    avatarId,
+    body,
+    earlierUnconfirmed,
+  );
+  if (!unsure) clearUnconfirmed(key); // the outcome is known now
+  return result;
+}
+
+// Posts the report, retrying temporary failures. Resolves to { result, unsure }:
+// unsure is true when the server may have stored the report without us seeing it.
+async function postWithRetries(avatarId, body, earlierUnconfirmed) {
   let lastErr = null;
-  let maybeSent = false; // an earlier attempt may have been stored by the server
+  let maybeSent = earlierUnconfirmed; // an attempt may have been stored unseen
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await axiosInstance.post(REPORT_URL, body);
-      return createdResult(avatarId, res.data?.id ?? null);
+      return {
+        result: createdResult(avatarId, res.data?.id ?? null),
+        unsure: false,
+      };
     } catch (err) {
       lastErr = err;
       if (err.response?.status === 409) {
-        return conflictResult(avatarId, maybeSent);
+        return { result: conflictResult(avatarId, maybeSent), unsure: false };
       }
       logFailedAttempt(avatarId, err);
 
@@ -279,7 +304,7 @@ async function sendReport({ avatarId, reason }) {
     }
   }
 
-  return failureResult(lastErr);
+  return { result: failureResult(lastErr), unsure: maybeSent };
 }
 
 const queue = [];
